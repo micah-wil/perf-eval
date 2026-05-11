@@ -69,6 +69,9 @@ def transform(raw: dict, args: argparse.Namespace) -> dict:
         "input_tput_per_gpu": input_throughput / tp,
     }
 
+    if os.environ.get("NIGHTLY") == "1":
+        data["nightly"] = True
+
     # Convert *_ms fields to seconds and emit interactivity (1000/tpot_ms).
     for key, value in raw.items():
         if not key.endswith("_ms"):

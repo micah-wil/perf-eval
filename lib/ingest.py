@@ -42,6 +42,9 @@ VLLM_ENV_VARS = (
     ("WORKLOAD_IMAGE", "image"),
     ("WORKLOAD_VLLM_COMMIT", "vllm_commit"),
 )
+# Set NIGHTLY=1 in the build env to mark rows as part of the nightly schedule.
+# The dashboard's /nightly view filters on this to pair adjacent nightlies.
+NIGHTLY_ENV = "NIGHTLY"
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -67,6 +70,8 @@ def metadata(workload: str, task: str) -> dict:
         v = (os.environ.get(env_key) or "").strip()
         if v:
             md[field] = v
+    if os.environ.get(NIGHTLY_ENV) == "1":
+        md["nightly"] = True
     return md
 
 
