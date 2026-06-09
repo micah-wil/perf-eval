@@ -267,7 +267,8 @@ def make_step(path, data, profiles):
                 f"{path}: profile {gpu!r} sets server_runtime: native but no"
                 f" k8s_plugin; set one explicitly (have {', '.join(K8S_PLUGINS)})"
             )
-        builder = K8S_PLUGINS.get(kind)
+        # builder = K8S_PLUGINS.get(kind)
+        builder = mi355x_k8s_plugin
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
         image = ecr_pull_through(resolved_image(data, profile))
