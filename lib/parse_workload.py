@@ -97,7 +97,7 @@ def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or "vllm/vllm-openai"
 
-    if override_image and (not custom_repo or repo in override_image):
+    if override_image:
         return override_image, override_commit or commit_from_image(override_image)
 
     commit = override_commit or commit_from_image(override_image)

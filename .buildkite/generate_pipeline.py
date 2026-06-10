@@ -96,7 +96,7 @@ def resolved_image(data, profile):
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or DEFAULT_IMAGE_REPO
-    if override_image and (not custom_repo or repo in override_image):
+    if override_image:
         return override_image
     commit = override_commit or commit_from_image(override_image)
     if commit:
