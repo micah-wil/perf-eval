@@ -190,7 +190,7 @@ def amd_k8s_plugin(image, num_gpus, profile=None):
                                 "valueFrom": {
                                     "secretKeyRef": {
                                         "name": "hf-token",
-                                        "key": "token",
+                                        "key": "TOKEN",
                                     },
                                 },
                             },
