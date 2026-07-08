@@ -30,7 +30,13 @@ if [[ "$WORKLOAD_SERVE_ARGS" =~ (^|[[:space:]])--trust-remote-code([[:space:]]|$
 fi
 mkdir -p "$RESULTS_DIR"
 
+# Run teardown on normal exit or on cancellation/timeout.
 trap 'stop_server "$CONTAINER"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+# Make sure GPUs are clean before we start
+preflight_gpus "$WORKLOAD_SERVER_RUNTIME"
 
 start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
