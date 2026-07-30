@@ -142,6 +142,16 @@ def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                                     },
                                 },
                             },
+                            {
+                                "name": "PERF_INGEST_TOKEN",
+                                "valueFrom": {
+                                    "secretKeyRef": {
+                                        "name": "perf-ingest-token",
+                                        "key": "token",
+                                        "optional": True,
+                                    },
+                                },
+                            },
                         ],
                     },
                 ],
@@ -212,6 +222,16 @@ def amd_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                                     "secretKeyRef": {
                                         "name": "hf-token",
                                         "key": "TOKEN",
+                                    },
+                                },
+                            },
+                            {
+                                "name": "PERF_INGEST_TOKEN",
+                                "valueFrom": {
+                                    "secretKeyRef": {
+                                        "name": "perf-ingest-token",
+                                        "key": "token",
+                                        "optional": True,
                                     },
                                 },
                             },

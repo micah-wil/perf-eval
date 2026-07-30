@@ -49,10 +49,14 @@ NIGHTLY_ENV = "NIGHTLY"
 
 def post(endpoint: str, payload: dict) -> None:
     body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("PERF_INGEST_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         endpoint,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
