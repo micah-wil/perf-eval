@@ -1,15 +1,17 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
+# amd/DeepSeek-R1-0528-MXFP4 on MI355X (migrated from vllm-dashboard nightly)
+name: deepseek-r1-0528-mxfp4-tp8-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: amd/DeepSeek-R1-0528-MXFP4
   env:
     VLLM_ROCM_USE_AITER: 1
+    AITER_QUICK_REDUCE_QUANTIZATION: INT4
   serve_args: >-
     --tensor-parallel-size 8
+    --kv-cache-dtype fp8
     --trust-remote-code
     --no-enable-prefix-caching
 
@@ -35,6 +37,16 @@ vllm_bench:
       output_len: 1024
       num_prompts: 10
       max_concurrency: 1
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-8
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 80
+      max_concurrency: 8
       args:
         num_warmups: 1
         temperature: 0

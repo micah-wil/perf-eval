@@ -1,0 +1,27 @@
+# amd/DeepSeek-R1-0528-MXFP4 on MI355X (migrated from vllm-dashboard nightly)
+name: deepseek-r1-0528-mxfp4-tp4-mi355x
+gpu: MI355X
+num_gpus: 8
+nightly: true
+
+vllm:
+  model: amd/DeepSeek-R1-0528-MXFP4
+  env:
+    VLLM_ROCM_USE_AITER: 1
+  serve_args: >-
+    --tensor-parallel-size 4
+    --trust-remote-code
+    --no-enable-prefix-caching
+
+vllm_bench:
+  configs:
+    - name: 128-in-128-out-conc-1
+      backend: openai
+      dataset: random
+      input_len: 128
+      output_len: 128
+      num_prompts: 10
+      max_concurrency: 1
+      args:
+        num_warmups: 1
+        temperature: 0

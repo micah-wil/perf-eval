@@ -17,7 +17,7 @@ CLAUDE.md         agent conventions and detailed Buildkite workflow
 
 ### Add a new recipe
 
-1. Copy an existing workload that targets the same GPU — e.g. `workloads/qwen3_5_h200.yaml` for H200 or `workloads/minimax_m3_b200.yaml` for B200.
+1. Copy an existing workload that targets the same GPU — e.g. `workloads/kimi_k2_6_mi355x.yaml` for MI355X or `workloads/deepseek_r1_0528_mi300x.yaml` for MI300X.
 2. Name the file `<model>_<hardware>.yaml`. Keep hardware variants in separate files.
 3. Edit the fields to match your model and tasks. Set `nightly: true` if it should run in the nightly schedule; leave it off for opt-in recipes.
 4. Open a PR. The pipeline auto-discovers `workloads/*.yaml` — no Buildkite YAML edits needed.
