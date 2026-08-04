@@ -216,7 +216,7 @@ def encode_bench_args(args: object, config_name: str, path: str) -> str:
 
 
 def _positive_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return isinstance(value, int) and value > 0
 
 
 def expand_bench_config(c: dict, path: str) -> list:
