@@ -11,9 +11,49 @@
 # on the host is visible to vLLM. For native runtime, values are exported before
 # starting `vllm serve` in the current job container.
 #
+# GPU passthrough for the Docker runtime depends on the vendor, taken from
+# WORKLOAD_GPU_VENDOR (default "nvidia"):
+#   nvidia  -> --gpus all               (needs the NVIDIA Container Toolkit)
+#   amd     -> --device /dev/kfd + DRI render nodes + the host `render` group
+#             (the ROCm equivalent; there is no `--gpus all` for ROCm). This is
+#             the path the bare-metal MI355X Buildkite agents use, mirroring
+#             vLLM's own ROCm CI (`.buildkite/scripts/hardware_ci/run-amd-test.sh`).
+# See DESIGN_mi355_bare_metal.md for how the bare-metal (docker-in-docker) agents
+# select this runtime.
+#
 # After start_server, vLLM logs are streamed to stdout (prefixed with `[vllm]`)
 # so build output reflects server startup progress in real time. The streamer's
 # PID is held in $VLLM_LOGS_PID; stop_server kills it.
+
+# Append vendor-specific GPU passthrough flags to the named docker-args array.
+#   $1 = name of the docker_args array (nameref)
+#   $2 = server port to publish (nvidia only; the amd path uses host networking)
+# Vendor comes from WORKLOAD_GPU_VENDOR (default nvidia).
+gpu_docker_args() {
+  local -n _args=$1
+  local port=$2
+  local vendor="${WORKLOAD_GPU_VENDOR:-nvidia}"
+
+  if [[ "$vendor" == "amd" || "$vendor" == "rocm" ]]; then
+    # ROCm has no `--gpus all`; expose the kernel-fusion driver and the DRI
+    # render nodes, and join the host `render` group that owns them. Host
+    # networking keeps the served port reachable at localhost:$port on the
+    # agent without a -p mapping (matches vLLM's ROCm CI).
+    _args+=(--network=host --shm-size=16g
+            --device=/dev/kfd --device=/dev/dri
+            --security-opt seccomp=unconfined
+            --cap-add=SYS_PTRACE --cap-add=IPC_LOCK)
+    local render_gid video_gid
+    render_gid=$(getent group render | cut -d: -f3)
+    video_gid=$(getent group video | cut -d: -f3)
+    [[ -n "$render_gid" ]] && _args+=(--group-add "$render_gid")
+    [[ -n "$video_gid" ]] && _args+=(--group-add "$video_gid")
+    return
+  fi
+
+  # NVIDIA (default): the container toolkit injects all visible GPUs.
+  _args+=(--gpus all -p "${port}:${port}")
+}
 
 start_server() {
   local container=$1 port=$2 image=$3 model=$4 serve_args=$5 env=$6 runtime=${7:-docker}
@@ -35,9 +75,9 @@ start_server() {
     return
   fi
 
-  local docker_args=(--gpus all --ipc=host --ulimit nofile=65536:65536
-                     -e VLLM_ENGINE_READY_TIMEOUT_S=3600
-                     -p "${port}:${port}")
+  local docker_args=(--ipc=host --ulimit nofile=65536:65536
+                     -e VLLM_ENGINE_READY_TIMEOUT_S=3600)
+  gpu_docker_args docker_args "$port"
   local hf_home=""
   while IFS= read -r kv; do
     [[ -z "$kv" ]] && continue

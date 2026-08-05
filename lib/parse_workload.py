@@ -102,6 +102,21 @@ def load_profile(gpu: str, workload_path: str) -> dict:
     return profiles[gpu]
 
 
+def effective_server_runtime(gpu: str, profile: dict) -> str:
+    """How the vLLM server is brought up: ``native`` (in the current pod, used
+    by the Kubernetes GPU plugins) or ``docker`` (``docker run`` on the agent).
+
+    A ``{GPU}_SERVER_RUNTIME`` env var overrides the profile, the same
+    per-cluster override idiom as ``{GPU}_QUEUE`` / ``{GPU}_HF_CACHE_VOLUME``.
+    This is how a bare-metal MI355X Buildkite queue (no Kubernetes) flips its
+    workloads from the in-pod ``native`` runtime to a docker-in-docker
+    ``docker`` runtime without editing any workload file. ``generate_pipeline``
+    reads the same override so the k8s plugin is dropped in lockstep.
+    """
+    override = (os.environ.get(f"{gpu.upper()}_SERVER_RUNTIME") or "").strip()
+    return override or profile.get("server_runtime", "docker")
+
+
 def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
     """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload."""
     override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
@@ -360,7 +375,15 @@ def main(path: str) -> None:
 
     image, vllm_commit = resolve_image(vllm, profile)
     env = {**(profile.get("env") or {}), **(vllm.get("env") or {})}
-    if "HF_HOME" not in env and profile.get("hf_home"):
+    # `{GPU}_HF_HOME` (per-cluster override) points the HF cache at a host path.
+    # For the docker runtime, server.sh bind-mounts this dir into the vLLM
+    # container so model weights persist across jobs on a bare-metal node
+    # (e.g. Crusoe's /mnt/m2m_nobackup). Mirrors {GPU}_HF_CACHE_VOLUME, which
+    # does the equivalent for the Kubernetes runtime.
+    hf_home_override = (os.environ.get(f"{gpu.upper()}_HF_HOME") or "").strip()
+    if hf_home_override:
+        env["HF_HOME"] = hf_home_override
+    elif "HF_HOME" not in env and profile.get("hf_home"):
         env["HF_HOME"] = profile["hf_home"]
 
     metadata = bench.get("metadata") or {}
@@ -373,7 +396,8 @@ def main(path: str) -> None:
     emit("VLLM_COMMIT", vllm_commit)
     emit("MODEL", vllm.get("model", ""))
     emit("SERVE_ARGS", serve_args)
-    emit("SERVER_RUNTIME", profile.get("server_runtime", "docker"))
+    emit("SERVER_RUNTIME", effective_server_runtime(gpu, profile))
+    emit("GPU_VENDOR", profile.get("gpu_vendor", "nvidia"))
     emit("ENV", "\n".join(f"{k}={fmt(v)}" for k, v in env.items()))
     emit("LM_EVAL_TASKS_TSV", task_tsv(tasks, lm_eval.get("model_args") or {}))
     emit("VLLM_BENCH_TSV", bench_tsv(bench_configs, path))

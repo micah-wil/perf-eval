@@ -18,6 +18,7 @@ B200:
 MI300X:
   queue: mi300_perf_eval
   image_repo: vllm/vllm-openai-rocm
+  gpu_vendor: amd
   server_runtime: native
   k8s_plugin: amd
   # HF cache lives in the container default and is backed by an emptyDir volume
@@ -29,7 +30,19 @@ MI300X:
 MI355X:
   queue: mi355_perf_eval
   image_repo: vllm/vllm-openai-rocm
+  gpu_vendor: amd
   server_runtime: native
   k8s_plugin: amd
   # See MI300X — HF cache defaults to an emptyDir-backed container path; override
   # the volume source per-cluster with MI355X_HF_CACHE_VOLUME.
+  #
+  # Bare-metal MI355X (e.g. the Crusoe dev nodes) have no Kubernetes, so the
+  # `amd` k8s plugin does not apply there. A build targeting that queue flips
+  # this profile to the docker-in-docker runtime with per-cluster env overrides
+  # (no workload edits) — the generator then drops the k8s plugin and the runner
+  # brings vLLM up with `docker run` using ROCm device passthrough
+  # (gpu_vendor: amd in lib/server.sh):
+  #     MI355X_QUEUE=<bare-metal-queue>
+  #     MI355X_SERVER_RUNTIME=docker
+  #     MI355X_HF_HOME=<host cache dir>   # bind-mounted into the vLLM container
+  # See DESIGN_mi355_bare_metal.md for the full picture and the infra checklist.

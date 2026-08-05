@@ -252,6 +252,18 @@ def queue_for_gpu(gpu, profile):
     return override or profile["queue"]
 
 
+def server_runtime_for_gpu(gpu, profile):
+    """Effective server runtime, honoring a ``{GPU}_SERVER_RUNTIME`` override.
+
+    Kept identical to ``parse_workload.effective_server_runtime`` so the
+    pipeline generator and the runner agree: when a bare-metal queue overrides
+    the runtime to ``docker`` the step drops its Kubernetes plugin here, and
+    the runner brings vLLM up with ``docker run`` instead of in-pod.
+    """
+    override = (os.environ.get(f"{gpu.upper()}_SERVER_RUNTIME") or "").strip()
+    return override or profile.get("server_runtime", "docker")
+
+
 def make_step(path, data, profiles):
     name = data.get("name", os.path.basename(path).removesuffix(".yaml"))
     gpu = data.get("gpu")
@@ -280,7 +292,7 @@ def make_step(path, data, profiles):
         "commands": setup_commands + [RUN_TEMPLATE.format(path=path)],
         "artifact_paths": ["results/**/*"],
     }
-    if profile.get("server_runtime") == "native":
+    if server_runtime_for_gpu(gpu, profile) == "native":
         kind = profile.get("k8s_plugin")
         if not kind:
             sys.exit(

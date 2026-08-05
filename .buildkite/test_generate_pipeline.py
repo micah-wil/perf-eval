@@ -89,6 +89,62 @@ def test_env_override_is_scoped_per_gpu():
     assert "emptyDir" in vols["hf-cache"], vols["hf-cache"]
 
 
+def _step_for(profile, gpu, env=None):
+    """Build a step for a minimal bench-only workload against a given profile."""
+    prev = {}
+    env = env or {}
+    for k, v in env.items():
+        prev[k] = os.environ.get(k)
+        os.environ[k] = v
+    try:
+        data = {
+            "name": f"probe-{gpu.lower()}",
+            "gpu": gpu,
+            "num_gpus": 8,
+            "vllm": {"model": "some/model", "serve_args": "-tp 8"},
+            "vllm_bench": {"configs": [{"name": "c", "input_len": 1,
+                                        "output_len": 1, "num_prompts": 1,
+                                        "max_concurrency": 1}]},
+        }
+        return g.make_step(f"workloads/{gpu.lower()}.yaml", data, {gpu: profile})
+    finally:
+        for k, old in prev.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
+
+def test_native_profile_emits_k8s_plugin():
+    """A native + k8s_plugin profile (the default k8s clusters) gets a plugin."""
+    profile = {"queue": "mi355_perf_eval", "image_repo": "vllm/vllm-openai-rocm",
+               "gpu_vendor": "amd", "server_runtime": "native", "k8s_plugin": "amd"}
+    step = _step_for(profile, "MI355X")
+    assert "plugins" in step, "native profile must emit a k8s plugin"
+    assert step["agents"]["queue"] == "mi355_perf_eval"
+
+
+def test_server_runtime_override_drops_k8s_plugin():
+    """A bare-metal queue overriding {GPU}_SERVER_RUNTIME=docker must run
+    run.sh on the agent (no k8s plugin) — the docker-in-docker path."""
+    profile = {"queue": "mi355_perf_eval", "image_repo": "vllm/vllm-openai-rocm",
+               "gpu_vendor": "amd", "server_runtime": "native", "k8s_plugin": "amd"}
+    step = _step_for(
+        profile, "MI355X",
+        env={"MI355X_SERVER_RUNTIME": "docker", "MI355X_QUEUE": "mi355_crusoe"},
+    )
+    assert "plugins" not in step, "docker runtime must not emit a k8s plugin"
+    assert step["agents"]["queue"] == "mi355_crusoe"
+
+
+def test_server_runtime_override_is_scoped_per_gpu():
+    """A runtime override for one GPU must not leak into another GPU."""
+    profile = {"queue": "mi300_perf_eval", "image_repo": "vllm/vllm-openai-rocm",
+               "gpu_vendor": "amd", "server_runtime": "native", "k8s_plugin": "amd"}
+    step = _step_for(profile, "MI300X", env={"MI355X_SERVER_RUNTIME": "docker"})
+    assert "plugins" in step, "MI355X override must not affect MI300X"
+
+
 def test_shipped_amd_profiles_have_no_rootdisk_hostpath():
     """The committed MI300X/MI355X profiles must not reintroduce an hf_home under
     /mnt/shared (the concrete path that leaked onto root disks)."""
