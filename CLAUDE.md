@@ -37,8 +37,29 @@ exec(open('lib/parse_workload.py').read())
 **Shell syntax** — catches typos in the orchestrator and helpers without executing them:
 
 ```bash
-bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh
+bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh \
+  && bash -n lib/sql_conn.sh
 ```
+
+**SQL sink schema** — dump the DDL without touching a database:
+
+```bash
+python3 lib/sql_upload.py --print-schema
+```
+
+Never commit `.sqlconn`, and never echo `TIGER_SQL_PASSWD` into build logs — in
+CI the credentials come from Buildkite Secrets, not from the repo.
+
+The five settings are `TIGER_SQL_HOST`, `TIGER_SQL_PORT`, `TIGER_SQL_USER`,
+`TIGER_SQL_PASSWD`, `TIGER_SQL_DB` — one set of names for the Buildkite secrets,
+the `perf-eval-sql` Kubernetes secret keys, the environment, and `.sqlconn`. The
+list is declared in three places that must stay in sync: `CONN_KEYS` in
+`lib/sql_upload.py`, `SQL_CONN_KEYS` in `lib/sql_conn.sh`, and `SQL_ENV_VARS` in
+`.buildkite/generate_pipeline.py`.
+
+A configured `TIGER_SQL_DB` makes SQL the destination on its own — no
+`INGEST_SINK` needed. Set `INGEST_SINK=endpoint` to force the public endpoint, or
+`both` to write to each.
 
 If you actually need real validation (parser hitting lm-eval's task registry rather than a stub), `pip install 'lm-eval[api]' pyyaml` first. Without it the parser exits with `cannot validate task names: lm_eval not importable` — that's intentional, never silently skip validation.
 

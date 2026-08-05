@@ -11,6 +11,13 @@ Override env vars are propagated to each step:
   VLLM_IMAGE   full docker image URI; overrides workload's vllm.image
   VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
   BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
+  INGEST_SINK  ingestion destination: endpoint (default), sql, or both
+
+When INGEST_SINK selects the SQL destination, the TIGER_SQL_* connection
+settings are read from Buildkite Secrets at run time by lib/sql_conn.sh — no
+credential is ever written into the generated pipeline. For steps that run in
+Kubernetes the settings are also wired in as ``secretKeyRef`` entries pointing
+at the SQL_SECRET_NAME secret.
 
 Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
 without forcing the whole build to skip lm_eval.
@@ -41,9 +48,11 @@ def setup_command(packages):
     )
 
 
-FULL_SETUP_COMMANDS = [setup_command("'lm-eval[api]' pyyaml")]
+# pymysql is the driver lib/sql_upload.py prefers. It is pure Python and tiny,
+# so it is installed unconditionally rather than branching on INGEST_SINK.
+FULL_SETUP_COMMANDS = [setup_command("'lm-eval[api]' pyyaml pymysql")]
 
-BENCH_ONLY_SETUP_COMMANDS = [setup_command("pyyaml")]
+BENCH_ONLY_SETUP_COMMANDS = [setup_command("pyyaml pymysql")]
 
 RUN_TEMPLATE = (
     'export HF_HOME="$(pwd)/.hf-cache" PATH="$(pwd)/.venv/bin:$HOME/.local/bin:$PATH"'
@@ -66,6 +75,47 @@ ECR_PUBLIC_PREFIX = "public.ecr.aws/"
 ECR_PULL_THROUGH_CACHE = (
     "936637512419.dkr.ecr.us-west-2.amazonaws.com/vllm-ci-pull-through-cache/"
 )
+
+# SQL sink credentials. Never inlined into the pipeline: agent-run steps fetch
+# them from Buildkite Secrets in lib/sql_conn.sh, and Kubernetes steps get them
+# as secretKeyRef entries from the cluster secret named below, whose keys match
+# these names. Keep in sync with CONN_KEYS in lib/sql_upload.py.
+SQL_ENV_VARS = (
+    "TIGER_SQL_HOST",
+    "TIGER_SQL_PORT",
+    "TIGER_SQL_USER",
+    "TIGER_SQL_PASSWD",
+    "TIGER_SQL_DB",
+)
+DEFAULT_SQL_SECRET_NAME = "perf-eval-sql"
+
+
+def sql_secrets_wanted():
+    """Whether to wire the SQL secret into Kubernetes steps.
+
+    The destination is decided at run time inside the pod — a configured
+    TIGER_SQL_DB selects SQL — so the refs have to be present for that detection
+    to see anything. They are ``optional: true``, so emitting them when no such
+    secret exists is a no-op. Only an explicit INGEST_SINK=endpoint, which rules
+    SQL out for the whole build, suppresses them.
+    """
+    return (os.environ.get("INGEST_SINK") or "").strip().lower() != "endpoint"
+
+
+def sql_secret_env():
+    """secretKeyRef env entries for the SQL settings, for Kubernetes steps."""
+    secret = (
+        os.environ.get("SQL_SECRET_NAME") or DEFAULT_SQL_SECRET_NAME
+    ).strip()
+    return [
+        {
+            "name": key,
+            "valueFrom": {
+                "secretKeyRef": {"name": secret, "key": key, "optional": True},
+            },
+        }
+        for key in SQL_ENV_VARS
+    ]
 
 
 def ecr_pull_through(image):
@@ -142,7 +192,7 @@ def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                                     },
                                 },
                             },
-                        ],
+                        ] + (sql_secret_env() if sql_secrets_wanted() else []),
                     },
                 ],
                 "volumes": [
@@ -215,7 +265,7 @@ def amd_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                                     },
                                 },
                             },
-                        ],
+                        ] + (sql_secret_env() if sql_secrets_wanted() else []),
                     },
                 ],
                 "volumes": [
@@ -292,9 +342,12 @@ def make_step(path, data, profiles):
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
         image = ecr_pull_through(resolved_image(data, profile))
         step["plugins"] = [builder(image, data.get("num_gpus", 1), profile, gpu)]
+    # Only non-secret selectors are copied into the pipeline; SQL_* settings are
+    # deliberately absent so credentials never appear in the uploaded YAML.
     step_env = {
         k: os.environ[k]
-        for k in ("VLLM_IMAGE", "VLLM_COMMIT", "BENCH_ONLY")
+        for k in ("VLLM_IMAGE", "VLLM_COMMIT", "BENCH_ONLY", "INGEST_SINK",
+                  "SQL_SECRET_NAME")
         if os.environ.get(k)
     }
     if bench_only and "BENCH_ONLY" not in step_env:

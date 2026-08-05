@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 .hf-cache/
 results/
+# Local SQL sink credentials. In CI these come from Buildkite Secrets instead;
+# this file must never be committed.
+.sqlconn

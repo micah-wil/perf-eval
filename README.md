@@ -8,8 +8,9 @@ Each recipe is one `(model, hardware, set of tasks)` combination. The Buildkite 
 
 ```
 workloads/        one YAML per (model, hardware) recipe
-lib/              orchestrator (run.sh), helpers, GPU profiles
+lib/              orchestrator (run.sh), helpers, GPU profiles, ingestion sinks
 .buildkite/       pipeline bootstrap, step generator, and its tests
+.sqlconn          local-only SQL credentials (gitignored; see Ingestion destinations)
 CLAUDE.md         agent conventions and detailed Buildkite workflow
 ```
 
@@ -121,6 +122,96 @@ Do **not** set an `hf_home` under a node path like `/mnt/shared` unless that pat
 
 Run the generator's tests with `python3 .buildkite/test_generate_pipeline.py` (stdlib + pyyaml only; no GPU needed).
 
+### Ingestion destinations
+
+Results go to one of two destinations:
+
+| `INGEST_SINK` | Destination |
+| --- | --- |
+| `endpoint` | POST to the public Cloud Run endpoints backing the Databricks tables — the vLLM eval and perf dashboards |
+| `sql` | INSERT into a MySQL/MariaDB database |
+| `both` | Write to both |
+
+**You normally don't set this.** When `INGEST_SINK` is unset the destination is detected: if `TIGER_SQL_DB` is configured — in the environment, in Buildkite Secrets, or in `.sqlconn` — results go to SQL **instead of** the public endpoint. With no SQL settings present the endpoint remains the default, so nothing changes for runs that never configure a database.
+
+Set `INGEST_SINK` explicitly to override the detection: `endpoint` to keep publishing to the dashboards even with a database configured, or `both` to write to each.
+
+**SQL tables.** `lib/sql_upload.py` owns the schema. Creating it is a **one-time step per database**, run by hand — eval runs only ever `INSERT`:
+
+```bash
+python3 lib/sql_upload.py --create-tables
+```
+
+Every statement is `CREATE TABLE IF NOT EXISTS`, so re-running it is harmless. When the SQL sink is selected, `run.sh` probes the connection with `--check` before starting the server and aborts if a table is missing, so a forgotten bootstrap fails immediately instead of after an hour of GPU time. Four tables:
+
+- **`eval_results`** — one row per lm_eval `results_*.json`, with the full JSON in a `data` column.
+- **`eval_metrics`** — `eval_results` flattened to one row per `(subtask, metric)` with `value` and `stderr`, so the dashboard can query scores without parsing JSON.
+- **`eval_samples`** — one row per line of `samples_*.jsonl`.
+- **`perf_results`** — one row per `vllm bench serve` config, with the dashboard's per-GPU throughput and latency columns. Unrecognized fields land in an `extra` JSON column instead of being dropped.
+
+Every table carries the workload, task, image, vLLM commit, `nightly` flag, and Buildkite build columns. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
+
+Inspect or bootstrap the schema without running an eval:
+
+```bash
+python3 lib/sql_upload.py --print-schema     # dump the DDL, no connection needed
+python3 lib/sql_upload.py --check            # verify credentials, connectivity, tables
+python3 lib/sql_upload.py --create-tables    # one-time: create anything missing
+```
+
+The account used by eval runs only needs `INSERT`/`UPDATE`/`SELECT` on these tables. `CREATE` is needed just for the one-time bootstrap, so it can be done by a different (admin) account — pipe the DDL in directly if that is easier:
+
+```bash
+python3 lib/sql_upload.py --print-schema | mysql -h <host> -u <admin> -p <database>
+```
+
+**Credentials.** Five settings, one set of names used everywhere — in the Buildkite secrets, in the Kubernetes secret's keys, in the environment, and in `.sqlconn`:
+
+```
+TIGER_SQL_HOST  TIGER_SQL_PORT  TIGER_SQL_USER  TIGER_SQL_PASSWD  TIGER_SQL_DB
+```
+
+`TIGER_SQL_HOST`, `TIGER_SQL_USER`, and `TIGER_SQL_DB` are required; `TIGER_SQL_PORT` defaults to 3306 and `TIGER_SQL_PASSWD` may be empty. `lib/sql_conn.sh` resolves them, first hit per key wins:
+
+1. **The environment** — a Buildkite step env var, a Kubernetes `secretKeyRef`, or a manual export.
+2. **Buildkite Secrets** — `buildkite-agent secret get TIGER_SQL_PASSWD`, etc.
+3. **A local `.sqlconn` file** — development only. It is gitignored and must stay that way.
+
+Nothing in this repo logs a password: only key names and their source are printed, and the connection summary is rendered redacted.
+
+In CI, store the five values as Buildkite Secrets under exactly those names. For steps that run in a Kubernetes pod (every B200 and AMD profile), whether `buildkite-agent secret get` resolves depends on the agent stack's configuration, so the generator also wires the settings in as `secretKeyRef` entries from a cluster secret — `perf-eval-sql` by default, overridable with `SQL_SECRET_NAME`:
+
+```bash
+kubectl create secret generic perf-eval-sql \
+  --namespace <agent-namespace> \
+  --from-literal=TIGER_SQL_HOST=... \
+  --from-literal=TIGER_SQL_PORT=... \
+  --from-literal=TIGER_SQL_USER=... \
+  --from-literal=TIGER_SQL_PASSWD=... \
+  --from-literal=TIGER_SQL_DB=...
+```
+
+Every ref is `optional: true`, so a missing secret yields the loader's `missing credentials` abort rather than a pod that won't schedule. Either source satisfies the loader, and credentials are never written into the generated pipeline YAML.
+
+`SQL_HOST` may be given as a bare hostname or a URL; a `http://`/`https://`/`mysql://` scheme, trailing path, and embedded port are all normalized away before the driver sees it.
+
+A MySQL driver is required: `pymysql` (preferred, and installed by the pipeline's setup step) or `mysql-connector-python`.
+
+Locally:
+
+```bash
+cat > .sqlconn <<'EOF'
+TIGER_SQL_HOST="db.example.com"
+TIGER_SQL_PORT=3306
+TIGER_SQL_USER="someone"
+TIGER_SQL_PASSWD="..."
+TIGER_SQL_DB="tiger_db"
+EOF
+python3 lib/sql_upload.py --create-tables   # once per database
+python3 lib/sql_upload.py --check
+./lib/run.sh workloads/qwen3_5_h200.yaml    # TIGER_SQL_DB is set, so results go to SQL
+```
+
 ### Trigger a Buildkite build
 
 The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). With no extra config, a build runs every workload that has `nightly: true`.
@@ -136,6 +227,8 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
+- `INGEST_SINK` — `endpoint`, `sql`, or `both`. Usually unnecessary: a configured `TIGER_SQL_DB` already routes results to SQL. See [Ingestion destinations](#ingestion-destinations). Don't put credentials in build env vars; they belong in Buildkite Secrets.
+- `SQL_SECRET_NAME` — name of the Kubernetes secret holding the SQL settings for pod-based steps. Defaults to `perf-eval-sql`.
 
 **Example — trigger a build from the Buildkite UI:**
 

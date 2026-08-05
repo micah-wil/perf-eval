@@ -15,6 +15,31 @@ source "$DIR/server.sh"
 source "$DIR/run_lm_eval.sh"
 # shellcheck disable=SC1091
 source "$DIR/run_vllm_bench.sh"
+# shellcheck disable=SC1091
+source "$DIR/sql_conn.sh"
+
+# Resolve the ingestion destination once and hand it to every helper, so the
+# detection in ingest_sink() (a configured TIGER_SQL_DB means SQL) happens here
+# rather than separately in each ingest invocation.
+INGEST_SINK="$(ingest_sink)"
+export INGEST_SINK
+
+# Credentials are resolved and the connection probed once up front so a missing
+# secret or an unreachable database fails before the GPU time is spent, rather
+# than after every task has already run. The tables are expected to already
+# exist: creating them is a one-time step, `lib/sql_upload.py --create-tables`.
+if sql_sink_enabled; then
+  echo "--- :floppy_disk: ingest sink: ${INGEST_SINK}"
+  if ! load_sql_conn; then
+    echo "  sql: cannot resolve credentials; aborting before the run starts" >&2
+    exit 1
+  fi
+  if ! python3 "$DIR/sql_upload.py" --check; then
+    echo "  sql: cannot reach the database; aborting before the run starts" >&2
+    exit 1
+  fi
+fi
+
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
 export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME
@@ -54,6 +79,8 @@ while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc speed_subset
     --precision "$WORKLOAD_BENCH_PRECISION" \
     --model "$WORKLOAD_MODEL" \
     --image "$WORKLOAD_IMAGE" \
+    --workload "$WORKLOAD_NAME" \
+    --bench-name "$bname" \
     --isl "$isl" --osl "$osl" --conc "$conc" || true
 done <<< "$WORKLOAD_VLLM_BENCH_TSV"
 
