@@ -1,0 +1,28 @@
+# openai/gpt-oss-120b on MI300X (migrated from vllm-dashboard nightly)
+name: gpt-oss-120b-tp8-mi300x
+gpu: MI300X
+num_gpus: 8
+nightly: true
+
+vllm:
+  model: openai/gpt-oss-120b
+  env:
+    VLLM_ROCM_USE_AITER: 1
+  serve_args: >-
+    --tensor-parallel-size 8
+    --trust-remote-code
+    --no-enable-prefix-caching
+
+lm_eval:
+  model_args:
+    tokenized_requests: false
+    tokenizer_backend: null
+    add_bos_token: true
+    trust_remote_code: true
+    timeout: 6000
+  tasks:
+    - name: gsm8k
+      num_fewshot: 5
+      model_args:
+        num_concurrent: 64
+        max_gen_toks: 2048

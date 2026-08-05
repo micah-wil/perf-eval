@@ -1,30 +1,18 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
+# meta-llama/Llama-3.1-70B-Instruct on MI355X (migrated from vllm-dashboard nightly)
+name: llama-3-1-70b-instruct-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: meta-llama/Llama-3.1-70B-Instruct
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
     --tensor-parallel-size 8
+    --dtype float16
     --trust-remote-code
     --no-enable-prefix-caching
-
-lm_eval:
-  model_args:
-    tokenized_requests: false
-    tokenizer_backend: null
-    add_bos_token: true
-    trust_remote_code: true
-    timeout: 6000
-  tasks:
-    - name: gsm8k
-      num_fewshot: 5
-      model_args:
-        num_concurrent: 64
 
 vllm_bench:
   configs:
@@ -45,16 +33,6 @@ vllm_bench:
       output_len: 1024
       num_prompts: 640
       max_concurrency: 64
-      args:
-        num_warmups: 1
-        temperature: 0
-    - name: 1k-in-1k-out-conc-128
-      backend: openai
-      dataset: random
-      input_len: 1024
-      output_len: 1024
-      num_prompts: 1280
-      max_concurrency: 128
       args:
         num_warmups: 1
         temperature: 0

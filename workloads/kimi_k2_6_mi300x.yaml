@@ -1,15 +1,15 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
-gpu: MI355X
+# moonshotai/Kimi-K2.6 on MI300X (migrated from vllm-dashboard nightly)
+name: kimi-k2-6-mi300x
+gpu: MI300X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: moonshotai/Kimi-K2.6
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
-    --tensor-parallel-size 8
+    --tensor-parallel-size 4
     --trust-remote-code
     --no-enable-prefix-caching
 

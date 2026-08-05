@@ -1,15 +1,18 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
+# amd/Llama-3.3-70B-Instruct-MXFP4-Preview on MI355X (migrated from vllm-dashboard nightly)
+name: llama-3-3-70b-instruct-mxfp4-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: amd/Llama-3.3-70B-Instruct-MXFP4-Preview
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
-    --tensor-parallel-size 8
+    --tensor-parallel-size 1
+    --kv-cache-dtype fp8
+    --async-scheduling
+    --attention_config.backend ROCM_AITER_UNIFIED_ATTN
     --trust-remote-code
     --no-enable-prefix-caching
 

@@ -1,15 +1,16 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
-gpu: MI355X
+# amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV on MI300X (migrated from vllm-dashboard nightly)
+name: mixtral-8x22b-fp8-kv-mi300x
+gpu: MI300X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
     --tensor-parallel-size 8
+    --kv-cache-dtype fp8
     --trust-remote-code
     --no-enable-prefix-caching
 
@@ -45,16 +46,6 @@ vllm_bench:
       output_len: 1024
       num_prompts: 640
       max_concurrency: 64
-      args:
-        num_warmups: 1
-        temperature: 0
-    - name: 1k-in-1k-out-conc-128
-      backend: openai
-      dataset: random
-      input_len: 1024
-      output_len: 1024
-      num_prompts: 1280
-      max_concurrency: 128
       args:
         num_warmups: 1
         temperature: 0

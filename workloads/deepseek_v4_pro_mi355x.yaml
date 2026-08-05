@@ -1,5 +1,5 @@
-# DeepSeek-V4-Pro on MI355X
-name: deepseek_v4_pro-mi355x
+# deepseek-ai/DeepSeek-V4-Pro on MI355X (migrated from vllm-dashboard nightly)
+name: deepseek-v4-pro-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
@@ -13,29 +13,49 @@ vllm:
     --kv-cache-dtype fp8
     --trust-remote-code
     --no-enable-prefix-caching
-    --quantization deepseek_v4_fp8
 
 lm_eval:
   model_args:
     tokenized_requests: false
     tokenizer_backend: null
+    add_bos_token: true
+    trust_remote_code: true
     timeout: 6000
   tasks:
     - name: gsm8k
       num_fewshot: 5
       model_args:
         num_concurrent: 64
-        max_length: 32768
-        max_gen_toks: 8192
 
 vllm_bench:
   configs:
-    - name: 8k-in-1k-out-conc-128
+    - name: 1k-in-1k-out-conc-1
       backend: openai
       dataset: random
-      input_len: 8192
+      input_len: 1024
       output_len: 1024
-      num_prompts: 512
+      num_prompts: 10
+      max_concurrency: 1
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-64
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 640
+      max_concurrency: 64
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-128
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 1280
       max_concurrency: 128
-      speed_bench_dataset_subset: throughput_8k
-      speed_bench_category: low_entropy
+      args:
+        num_warmups: 1
+        temperature: 0

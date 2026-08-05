@@ -1,11 +1,11 @@
-# Qwen/Qwen3.5-397B-A17B-FP8 on MI355X (migrated from vllm-dashboard nightly)
-name: qwen3-5-mi355x
-gpu: MI355X
+# mistralai/Mixtral-8x22B-Instruct-v0.1 on MI300X (migrated from vllm-dashboard nightly)
+name: mixtral-8x22b-mi300x
+gpu: MI300X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: mistralai/Mixtral-8x22B-Instruct-v0.1
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
@@ -45,16 +45,6 @@ vllm_bench:
       output_len: 1024
       num_prompts: 640
       max_concurrency: 64
-      args:
-        num_warmups: 1
-        temperature: 0
-    - name: 1k-in-1k-out-conc-128
-      backend: openai
-      dataset: random
-      input_len: 1024
-      output_len: 1024
-      num_prompts: 1280
-      max_concurrency: 128
       args:
         num_warmups: 1
         temperature: 0

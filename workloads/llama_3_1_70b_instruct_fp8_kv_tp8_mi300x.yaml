@@ -1,0 +1,28 @@
+# amd/Llama-3.1-70B-Instruct-FP8-KV on MI300X (migrated from vllm-dashboard nightly)
+name: llama-3-1-70b-instruct-fp8-kv-tp8-mi300x
+gpu: MI300X
+num_gpus: 8
+nightly: true
+
+vllm:
+  model: amd/Llama-3.1-70B-Instruct-FP8-KV
+  env:
+    VLLM_ROCM_USE_AITER: 1
+  serve_args: >-
+    --tensor-parallel-size 8
+    --dtype float16
+    --trust-remote-code
+    --no-enable-prefix-caching
+
+vllm_bench:
+  configs:
+    - name: 1k-in-1k-out-conc-128
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 1280
+      max_concurrency: 128
+      args:
+        num_warmups: 1
+        temperature: 0
