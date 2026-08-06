@@ -30,21 +30,20 @@ export INGEST_SINK
 echo "  sql: ingest sink resolved to ${INGEST_SINK}"
 if [[ "$INGEST_SINK" == "endpoint" ]]; then
   echo "  sql: no TIGER_SQL_DB visible, so results go to the public endpoint"
-  echo "  sql: set INGEST_SINK=sql to fail the step instead of falling back"
 fi
 
-# Credentials are resolved and the connection probed once up front so a missing
-# secret or an unreachable database fails before the GPU time is spent, rather
-# than after every task has already run. The tables are expected to already
-# exist and are managed outside this repo; --check only verifies them.
+# Credentials and connectivity are probed once up front purely to surface
+# problems early — this is advisory and never fails the run. Ingestion is
+# best-effort: an unreachable database must not throw away hours of GPU work,
+# and the results are still saved and uploaded as Buildkite artifacts, so they
+# can be loaded into SQL afterwards. The tables are expected to already exist
+# and are managed outside this repo; --check only verifies them.
 if sql_sink_enabled; then
   if ! load_sql_conn; then
-    echo "  sql: cannot resolve credentials; aborting before the run starts" >&2
-    exit 1
-  fi
-  if ! python3 "$DIR/sql_upload.py" --check; then
-    echo "  sql: cannot reach the database; aborting before the run starts" >&2
-    exit 1
+    echo "  sql: cannot resolve credentials — continuing, uploads will be skipped" >&2
+  elif ! python3 "$DIR/sql_upload.py" --check; then
+    echo "  sql: preflight failed — continuing anyway; each task will still try" >&2
+    echo "  sql: results remain available as artifacts for a later manual upload" >&2
   fi
 fi
 

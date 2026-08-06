@@ -136,7 +136,7 @@ Results go to one of two destinations:
 
 Set `INGEST_SINK` explicitly to override the detection: `endpoint` to keep publishing to the dashboards even with a database configured, or `both` to write to each.
 
-**SQL tables.** The schema is **owned outside this repo** — nothing here issues DDL, and the ingest scripts only ever `INSERT`/`UPDATE` rows. `lib/sql_upload.py --print-schema` dumps the shape the code expects so a DBA can create or alter the tables by hand. When the SQL sink is selected, `run.sh` runs `--check` before starting the server and aborts if a table *or an expected column* is missing, so a schema drift fails immediately instead of after an hour of GPU time. Four tables:
+**SQL tables.** The schema is **owned outside this repo** — nothing here issues DDL, and the ingest scripts only ever `INSERT`/`UPDATE` rows. `lib/sql_upload.py --print-schema` dumps the shape the code expects so a DBA can create or alter the tables by hand. When the SQL sink is selected, `run.sh` runs `--check` before starting the server and reports missing tables or columns up front. The check is **advisory** — it never fails the run, because ingestion is best-effort and an unreachable database must not throw away hours of GPU work. Four tables:
 
 - **`eval_results`** — one row per lm_eval `results_*.json`, with the full JSON in a `data` column.
 - **`eval_metrics`** — `eval_results` flattened to one row per `(subtask, metric)` with `value` and `stderr`, so the dashboard can query scores without parsing JSON.
@@ -153,7 +153,9 @@ Every table carries the workload, task, image, vLLM commit, `nightly` flag, and 
 | `serve_command` | the `vllm serve` / `docker run` line that brought the server up |
 | `bench_command` / `eval_command` | the exact `vllm bench serve` / `lm_eval` line, captured as it ran |
 
-The two command columns come from `.cmd` files the run helpers write next to each result, so they are the real invocation rather than a reconstruction. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
+The two command columns come from `.cmd` files the run helpers write next to each result, so they are the real invocation rather than a reconstruction.
+
+**Ingestion never fails a run.** Every upload path is best-effort: a missing credential, an unreachable host, or a rejected write is logged loudly and the run continues. Results are always written under `results/` and uploaded as Buildkite artifacts, so anything that did not reach SQL can be loaded afterwards from the artifacts of that build. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
 
 Inspect the expected schema, or verify a database against it:
 
@@ -198,7 +200,7 @@ kubectl create secret generic perf-eval-sql \
   --from-literal=TIGER_SQL_DB=...
 ```
 
-Every ref is `optional: true`, so a missing Kubernetes secret leaves the variables unset rather than blocking the pod from scheduling. That is deliberate, but it means a missing secret degrades **silently**: with no `TIGER_SQL_DB` visible, the destination falls back to the endpoint. `run.sh` prints a `sql-debug:` block naming every setting it found and every source it checked, so a run that went to the wrong place is diagnosable from the log. Pass `INGEST_SINK=sql` to turn that fallback into an immediate failure instead.
+Every ref is `optional: true`, so a missing Kubernetes secret leaves the variables unset rather than blocking the pod from scheduling. That is deliberate, but it means a missing secret degrades **silently**: with no `TIGER_SQL_DB` visible, the destination falls back to the endpoint. `run.sh` prints a `sql-debug:` block naming every setting it found and every source it checked, so a run that went to the wrong place is diagnosable from the log. Pass `INGEST_SINK=sql` to pin the destination regardless of what is detected.
 
 Credentials are never written into the generated pipeline YAML — only the secret *names* appear.
 

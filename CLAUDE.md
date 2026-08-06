@@ -52,6 +52,12 @@ python3 lib/sql_upload.py --check          # reports missing tables OR columns
 
 Never add `CREATE TABLE` / `ALTER TABLE` execution back into the ingest path.
 
+Ingestion is **best-effort and must never fail a run**: the SQL preflight in
+`run.sh` is advisory, and every per-task upload catches its own errors. An
+unreachable database must not discard hours of GPU work — the results are still
+written under `results/` and uploaded as Buildkite artifacts, so they can be
+loaded into SQL afterwards. Don't turn any of these back into `exit 1`.
+
 Never commit `.sqlconn`, and never echo `TIGER_SQL_PASSWD` into build logs — in
 CI the credentials come from Buildkite Secrets, not from the repo.
 
