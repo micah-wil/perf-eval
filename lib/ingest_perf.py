@@ -26,6 +26,7 @@ import datetime
 import json
 import os
 import sys
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -132,6 +133,10 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    print(f"  perf-ingest: workload={args.workload} bench={args.bench_name}"
+          f" sink={args.sink}")
+    sql_upload.print_debug_state(args.sqlconn_file)
+
     if not os.path.isfile(args.raw_result):
         print(f"  perf-ingest: raw result file not found: {args.raw_result}", file=sys.stderr)
         return 0
@@ -155,17 +160,25 @@ def main() -> int:
     if args.sink in ("sql", "both"):
         conn = None
         try:
+            print("  sql-debug: opening sql connection...")
             conn, config = sql_upload.open_sink(args.sqlconn_file)
             print(f"  perf-ingest -> sql {sql_upload.describe(config)}")
+            if config["conn_file"]:
+                print(f"  sql-debug: some settings came from {config['conn_file']}")
             sql_upload.write_perf(conn, data, args.workload, args.bench_name)
             print(f"    inserted into {sql_upload.TABLE_PERF_RESULTS}")
         except sql_upload.SqlSinkError as e:
             print(f"    sql sink unavailable: {e}", file=sys.stderr)
+            traceback.print_exc()
         except Exception as e:  # driver-specific connect/write errors
             print(f"    sql failed: {type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc()
         finally:
             if conn is not None:
                 conn.close()
+                print("  sql-debug: sql connection closed")
+    else:
+        print(f"  sql-debug: sink {args.sink!r} does not include sql; nothing written")
     return 0
 
 

@@ -243,6 +243,28 @@ def default_sink(conn_file=None):
     return "endpoint"
 
 
+def print_debug_state(conn_file=None):
+    """Print what the destination decision saw. Never prints a password."""
+    path = Path(conn_file or os.environ.get("SQLCONN_FILE") or DEFAULT_CONN_FILE)
+    print(f"  sql-debug: INGEST_SINK={os.environ.get('INGEST_SINK') or '<unset>'}")
+    for key in CONN_KEYS:
+        raw = os.environ.get(key)
+        if key == "TIGER_SQL_PASSWD":
+            shown = "<set>" if (raw or "").strip() else "<unset>"
+        else:
+            shown = raw if (raw or "").strip() else "<unset>"
+        print(f"  sql-debug: {key}={shown}")
+    print(f"  sql-debug: conn file {path}"
+          f" {'exists' if path.is_file() else 'missing'}")
+    if path.is_file():
+        try:
+            keys = sorted(_parse_conn_file(path))
+        except OSError as e:
+            print(f"  sql-debug: conn file unreadable: {e}")
+        else:
+            print(f"  sql-debug: conn file keys: {', '.join(keys) or '<none>'}")
+
+
 def _parse_conn_file(path):
     """Read shell-style `KEY=value` / `KEY="value"` pairs from a .sqlconn file."""
     values = {}

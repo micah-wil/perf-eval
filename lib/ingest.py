@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -166,6 +167,11 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    # Always state the destination. A run that used the endpoint because no SQL
+    # credential was visible must not look like a run that never tried.
+    print(f"  ingest: workload={args.workload} task={args.task} sink={args.sink}")
+    sql_upload.print_debug_state(args.sqlconn_file)
+
     root = Path(args.results_dir)
     if not root.is_dir():
         print(f"  ingest: results dir not found: {root}", file=sys.stderr)
@@ -173,18 +179,32 @@ def main() -> int:
 
     results_files = sorted(root.glob("**/results_*.json"))
     samples_files = [] if args.no_samples else sorted(root.glob("**/samples_*.jsonl"))
+    print(f"  sql-debug: cwd={Path.cwd()} results_dir={root}")
+    for f in results_files + samples_files:
+        print(f"  sql-debug: found {f} ({f.stat().st_size} bytes)")
+    if not results_files and not samples_files:
+        print(f"  ingest: no results_*.json or samples_*.jsonl under {root};"
+              " nothing to upload", file=sys.stderr)
     endpoint = args.endpoint if args.sink in ("endpoint", "both") else None
 
     conn = None
     if args.sink in ("sql", "both"):
         try:
+            print("  sql-debug: opening sql connection...")
             conn, config = sql_upload.open_sink(args.sqlconn_file)
             print(f"  ingest -> sql {sql_upload.describe(config)}")
+            if config["conn_file"]:
+                print(f"  sql-debug: some settings came from {config['conn_file']}")
         except sql_upload.SqlSinkError as e:
             print(f"  ingest: sql sink unavailable: {e}", file=sys.stderr)
+            traceback.print_exc()
         except Exception as e:
             print(f"  ingest: sql connect failed: {type(e).__name__}: {e}",
                   file=sys.stderr)
+            traceback.print_exc()
+    else:
+        print(f"  sql-debug: sink {args.sink!r} does not include sql;"
+              " no connection made")
     if endpoint:
         print(f"  ingest -> {endpoint}")
     if endpoint is None and conn is None:
@@ -207,6 +227,7 @@ def main() -> int:
             except Exception as e:  # driver-specific write errors
                 print(f"    failed {f.relative_to(root)}: {type(e).__name__}: {e}",
                       file=sys.stderr)
+                traceback.print_exc()
 
         for f in samples_files:
             try:
@@ -217,9 +238,11 @@ def main() -> int:
             except Exception as e:  # driver-specific write errors
                 print(f"    failed {f.relative_to(root)}: {type(e).__name__}: {e}",
                       file=sys.stderr)
+                traceback.print_exc()
     finally:
         if conn is not None:
             conn.close()
+            print("  sql-debug: sql connection closed")
 
     return 0
 

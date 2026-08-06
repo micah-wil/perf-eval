@@ -64,6 +64,34 @@ _sql_secret_get() {
   buildkite-agent secret get "$key" 2>/dev/null
 }
 
+# Debug dump of what the destination decision saw. Prints key names and where
+# they came from, never a value.
+sql_debug_state() {
+  local dir conn_file key err
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  conn_file="${SQLCONN_FILE:-${dir}/../.sqlconn}"
+  echo "  sql-debug: INGEST_SINK=${INGEST_SINK:-<unset>}"
+  for key in "${SQL_CONN_KEYS[@]}"; do
+    if [[ "$key" == TIGER_SQL_PASSWD ]]; then
+      echo "  sql-debug: ${key}=$([[ -n "${!key:-}" ]] && echo '<set>' || echo '<unset>')"
+    else
+      echo "  sql-debug: ${key}=${!key:-<unset>}"
+    fi
+  done
+  echo "  sql-debug: conn file ${conn_file} $([[ -f "$conn_file" ]] && echo exists || echo missing)"
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    # Capture stderr only; a successful fetch's value goes to /dev/null.
+    err="$(buildkite-agent secret get TIGER_SQL_DB 2>&1 >/dev/null)"
+    if [[ -n "$err" ]]; then
+      echo "  sql-debug: buildkite-agent secret get TIGER_SQL_DB failed: ${err}"
+    else
+      echo "  sql-debug: buildkite-agent secret get TIGER_SQL_DB succeeded"
+    fi
+  else
+    echo "  sql-debug: buildkite-agent not on PATH"
+  fi
+}
+
 load_sql_conn() {
   local dir key value from_secret=() from_env=() missing=()
   dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

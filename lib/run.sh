@@ -20,16 +20,24 @@ source "$DIR/sql_conn.sh"
 
 # Resolve the ingestion destination once and hand it to every helper, so the
 # detection in ingest_sink() (a configured TIGER_SQL_DB means SQL) happens here
-# rather than separately in each ingest invocation.
+# rather than separately in each ingest invocation. The selection is always
+# logged: a run that silently used the endpoint because no credential was
+# visible is otherwise indistinguishable from one that never tried.
+echo "--- :floppy_disk: resolving ingest sink"
+sql_debug_state          # before resolution, so INGEST_SINK shows as given
 INGEST_SINK="$(ingest_sink)"
 export INGEST_SINK
+echo "  sql: ingest sink resolved to ${INGEST_SINK}"
+if [[ "$INGEST_SINK" == "endpoint" ]]; then
+  echo "  sql: no TIGER_SQL_DB visible, so results go to the public endpoint"
+  echo "  sql: set INGEST_SINK=sql to fail the step instead of falling back"
+fi
 
 # Credentials are resolved and the connection probed once up front so a missing
 # secret or an unreachable database fails before the GPU time is spent, rather
 # than after every task has already run. The tables are expected to already
 # exist: creating them is a one-time step, `lib/sql_upload.py --create-tables`.
 if sql_sink_enabled; then
-  echo "--- :floppy_disk: ingest sink: ${INGEST_SINK}"
   if ! load_sql_conn; then
     echo "  sql: cannot resolve credentials; aborting before the run starts" >&2
     exit 1
