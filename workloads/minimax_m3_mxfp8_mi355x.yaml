@@ -5,7 +5,7 @@ num_gpus: 8
 nightly: true
 
 vllm:
-  model: amd/MiniMax-M3-MXFP8
+  model: MiniMaxAI/MiniMax-M3-MXFP8
   env:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
