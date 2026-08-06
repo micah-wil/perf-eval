@@ -41,11 +41,16 @@ bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh \
   && bash -n lib/sql_conn.sh
 ```
 
-**SQL sink schema** — dump the DDL without touching a database:
+**SQL sink schema** — the tables are owned **outside this repo**; nothing in
+`lib/` issues DDL. Dump the expected shape (CREATE plus the reproduction-column
+ALTERs) for a DBA to apply by hand, or verify a live database against it:
 
 ```bash
-python3 lib/sql_upload.py --print-schema
+python3 lib/sql_upload.py --print-schema   # no connection needed
+python3 lib/sql_upload.py --check          # reports missing tables OR columns
 ```
+
+Never add `CREATE TABLE` / `ALTER TABLE` execution back into the ingest path.
 
 Never commit `.sqlconn`, and never echo `TIGER_SQL_PASSWD` into build logs — in
 CI the credentials come from Buildkite Secrets, not from the repo.

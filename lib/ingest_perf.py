@@ -131,6 +131,11 @@ def main() -> int:
         default=None,
         help="Path to a .sqlconn file for --sink sql (env: SQLCONN_FILE)",
     )
+    p.add_argument(
+        "--command-file",
+        default=None,
+        help="File holding the vllm bench serve command line, stored for reproduction",
+    )
     args = p.parse_args()
 
     print(f"  perf-ingest: workload={args.workload} bench={args.bench_name}"
@@ -165,7 +170,8 @@ def main() -> int:
             print(f"  perf-ingest -> sql {sql_upload.describe(config)}")
             if config["conn_file"]:
                 print(f"  sql-debug: some settings came from {config['conn_file']}")
-            sql_upload.write_perf(conn, data, args.workload, args.bench_name)
+            sql_upload.write_perf(conn, data, args.workload, args.bench_name,
+                                  args.command_file)
             print(f"    inserted into {sql_upload.TABLE_PERF_RESULTS}")
         except sql_upload.SqlSinkError as e:
             print(f"    sql sink unavailable: {e}", file=sys.stderr)

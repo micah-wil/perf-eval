@@ -136,34 +136,39 @@ Results go to one of two destinations:
 
 Set `INGEST_SINK` explicitly to override the detection: `endpoint` to keep publishing to the dashboards even with a database configured, or `both` to write to each.
 
-**SQL tables.** `lib/sql_upload.py` owns the schema. Creating it is a **one-time step per database**, run by hand — eval runs only ever `INSERT`:
-
-```bash
-python3 lib/sql_upload.py --create-tables
-```
-
-Every statement is `CREATE TABLE IF NOT EXISTS`, so re-running it is harmless. When the SQL sink is selected, `run.sh` probes the connection with `--check` before starting the server and aborts if a table is missing, so a forgotten bootstrap fails immediately instead of after an hour of GPU time. Four tables:
+**SQL tables.** The schema is **owned outside this repo** — nothing here issues DDL, and the ingest scripts only ever `INSERT`/`UPDATE` rows. `lib/sql_upload.py --print-schema` dumps the shape the code expects so a DBA can create or alter the tables by hand. When the SQL sink is selected, `run.sh` runs `--check` before starting the server and aborts if a table *or an expected column* is missing, so a schema drift fails immediately instead of after an hour of GPU time. Four tables:
 
 - **`eval_results`** — one row per lm_eval `results_*.json`, with the full JSON in a `data` column.
 - **`eval_metrics`** — `eval_results` flattened to one row per `(subtask, metric)` with `value` and `stderr`, so the dashboard can query scores without parsing JSON.
 - **`eval_samples`** — one row per line of `samples_*.jsonl`.
 - **`perf_results`** — one row per `vllm bench serve` config, with the dashboard's per-GPU throughput and latency columns. Unrecognized fields land in an `extra` JSON column instead of being dropped.
 
-Every table carries the workload, task, image, vLLM commit, `nightly` flag, and Buildkite build columns. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
+Every table carries the workload, task, image, vLLM commit, `nightly` flag, and Buildkite build columns. `eval_results` and `perf_results` additionally record how to **reproduce** the run:
 
-Inspect or bootstrap the schema without running an eval:
+| Column | Contents |
+| --- | --- |
+| `image_digest` | `repo@sha256:...` for the image actually used — pinned, unlike a moving `:nightly` tag. NULL when it could not be resolved |
+| `vllm_version` | the served build, read from vLLM's `/version` (its `+g<sha>` suffix also backfills `vllm_commit`) |
+| `env_vars` | JSON of the env vLLM was started with (GPU profile baseline merged with the workload's overrides) |
+| `serve_command` | the `vllm serve` / `docker run` line that brought the server up |
+| `bench_command` / `eval_command` | the exact `vllm bench serve` / `lm_eval` line, captured as it ran |
+
+The two command columns come from `.cmd` files the run helpers write next to each result, so they are the real invocation rather than a reconstruction. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
+
+Inspect the expected schema, or verify a database against it:
 
 ```bash
-python3 lib/sql_upload.py --print-schema     # dump the DDL, no connection needed
-python3 lib/sql_upload.py --check            # verify credentials, connectivity, tables
-python3 lib/sql_upload.py --create-tables    # one-time: create anything missing
+python3 lib/sql_upload.py --print-schema     # expected DDL + ALTERs, no connection
+python3 lib/sql_upload.py --check            # credentials, connectivity, tables, columns
 ```
 
-The account used by eval runs only needs `INSERT`/`UPDATE`/`SELECT` on these tables. `CREATE` is needed just for the one-time bootstrap, so it can be done by a different (admin) account — pipe the DDL in directly if that is easier:
+The account used by eval runs only needs `INSERT`/`UPDATE`/`SELECT`. Applying the schema is a separate, manual, admin-account job:
 
 ```bash
 python3 lib/sql_upload.py --print-schema | mysql -h <host> -u <admin> -p <database>
 ```
+
+`--print-schema` emits the `CREATE TABLE`s followed by `ALTER TABLE ... ADD COLUMN` for the reproduction columns, so it covers both a fresh database and one created before those columns existed. `--check` names any that are absent.
 
 **Credentials.** Five settings, one set of names used everywhere — in the Buildkite secrets, in the Kubernetes secret's keys, in the environment, and in `.sqlconn`:
 
@@ -211,8 +216,7 @@ TIGER_SQL_USER="someone"
 TIGER_SQL_PASSWD="..."
 TIGER_SQL_DB="tiger_db"
 EOF
-python3 lib/sql_upload.py --create-tables   # once per database
-python3 lib/sql_upload.py --check
+python3 lib/sql_upload.py --check           # verifies the schema is in place
 ./lib/run.sh workloads/qwen3_5_h200.yaml    # TIGER_SQL_DB is set, so results go to SQL
 ```
 

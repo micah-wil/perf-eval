@@ -36,7 +36,7 @@ fi
 # Credentials are resolved and the connection probed once up front so a missing
 # secret or an unreachable database fails before the GPU time is spent, rather
 # than after every task has already run. The tables are expected to already
-# exist: creating them is a one-time step, `lib/sql_upload.py --create-tables`.
+# exist and are managed outside this repo; --check only verifies them.
 if sql_sink_enabled; then
   if ! load_sql_conn; then
     echo "  sql: cannot resolve credentials; aborting before the run starts" >&2
@@ -50,7 +50,7 @@ fi
 
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
-export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME
+export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME WORKLOAD_ENV
 
 PORT=8000
 CONTAINER="perf-eval-${WORKLOAD_NAME}-$$"
@@ -64,6 +64,10 @@ fi
 mkdir -p "$RESULTS_DIR"
 
 trap 'stop_server "$CONTAINER"' EXIT
+
+# Reproduction context: the digest of the image in use, resolved before the
+# server starts so it is available to every ingest call.
+resolve_image_digest "$WORKLOAD_IMAGE" "$WORKLOAD_SERVER_RUNTIME"
 
 start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
@@ -89,7 +93,8 @@ while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc speed_subset
     --image "$WORKLOAD_IMAGE" \
     --workload "$WORKLOAD_NAME" \
     --bench-name "$bname" \
-    --isl "$isl" --osl "$osl" --conc "$conc" || true
+    --isl "$isl" --osl "$osl" --conc "$conc" \
+    --command-file "${RESULTS_DIR}/bench-${bname}.cmd" || true
 done <<< "$WORKLOAD_VLLM_BENCH_TSV"
 
 if [[ "${BENCH_ONLY:-}" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss])$ ]]; then
@@ -106,6 +111,7 @@ while IFS=$'\t' read -r task fewshot model_args; do
     --results-dir "${RESULTS_DIR}/${task}" \
     --workload "$WORKLOAD_NAME" \
     --task "$task" \
+    --command-file "${RESULTS_DIR}/${task}.cmd" \
     ${INGEST_NO_SAMPLES:+--no-samples} || true
 done <<< "$WORKLOAD_LM_EVAL_TASKS_TSV"
 

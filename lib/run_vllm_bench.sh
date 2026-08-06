@@ -178,6 +178,13 @@ run_vllm_bench() {
     cmd+=(--save-result --result-filename "$in_container_json")
   fi
 
+  # Record the exact command next to the result so ingest can store it as the
+  # reproduction recipe. printf %q quotes each word, so the file is copy-pastable.
+  local cmd_file="${outdir}/bench-${name}.cmd"
+  printf '%q ' "${cmd[@]}" > "$cmd_file"
+  printf '\n' >> "$cmd_file"
+  echo "  command: $(cat "$cmd_file")"
+
   "${cmd[@]}"
 
   [[ "$runtime" != "native" ]] && docker cp "${container}:${in_container_json}" "$host_json"

@@ -13,14 +13,13 @@ secrets, the Kubernetes secret keys, the environment, and `.sqlconn`.
 Nothing here ever prints a password: `describe()` renders a redacted summary and
 that is the only connection string this repo logs.
 
-Creating the tables is a one-time administrative step, run by hand against the
-target database — the ingest scripts only ever INSERT:
+This module never issues DDL. The tables are owned and maintained outside this
+repo; the ingest scripts only ever INSERT/UPDATE rows. `--print-schema` dumps the
+shape they are expected to have so a DBA can create or alter them by hand, and
+`--check` verifies read-only that the database matches:
 
-    python3 lib/sql_upload.py --create-tables   # once, per database
-    python3 lib/sql_upload.py --check           # verify credentials/connectivity
-
-It reads the same credentials as the ingest scripts. Every statement is
-`CREATE TABLE IF NOT EXISTS`, so re-running it on an existing database is safe.
+    python3 lib/sql_upload.py --print-schema    # expected DDL, no connection
+    python3 lib/sql_upload.py --check           # credentials, connectivity, schema
 """
 
 import argparse
@@ -197,6 +196,35 @@ CREATE TABLE IF NOT EXISTS {TABLE_PERF_RESULTS} (
   KEY idx_perf_results_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """,
+}
+
+# Reproduction columns, added after the initial schema shipped. Kept separate
+# from the CREATE TABLE strings above so `--print-schema` can emit them as
+# ALTERs for a database that already exists, and so `--check` can report them as
+# missing. This module never applies them — the schema is managed outside the
+# repo.
+REPRO_COLUMNS = {
+    TABLE_EVAL_RESULTS: (
+        ("image_digest", "VARCHAR(255) NULL"),
+        ("vllm_version", "VARCHAR(128) NULL"),
+        ("env_vars", "JSON NULL"),
+        ("serve_command", "TEXT NULL"),
+        ("eval_command", "TEXT NULL"),
+    ),
+    TABLE_PERF_RESULTS: (
+        ("image_digest", "VARCHAR(255) NULL"),
+        ("vllm_version", "VARCHAR(128) NULL"),
+        ("env_vars", "JSON NULL"),
+        ("serve_command", "TEXT NULL"),
+        ("bench_command", "TEXT NULL"),
+    ),
+}
+
+# Env vars carrying the reproduction context, set by run.sh / server.sh.
+REPRO_ENV = {
+    "image_digest": "WORKLOAD_IMAGE_DIGEST",
+    "vllm_version": "WORKLOAD_VLLM_VERSION",
+    "serve_command": "WORKLOAD_SERVE_COMMAND",
 }
 
 # Columns perf_results stores natively; anything else the transform emits is
@@ -397,13 +425,21 @@ def connect(config):
     )
 
 
-def ensure_tables(conn, tables=None):
-    """Create any missing tables. Idempotent; safe to call on every run."""
-    names = tables or list(SCHEMA)
+def existing_columns(conn, table):
+    """Lowercased column names present on a table (empty if it does not exist)."""
     with conn.cursor() as cur:
-        for name in names:
-            cur.execute(SCHEMA[name].strip())
-    conn.commit()
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = DATABASE() AND table_name = %s",
+            (table,),
+        )
+        return {str(r[0]).lower() for r in cur.fetchall() or ()}
+
+
+def missing_columns(conn, table):
+    """REPRO_COLUMNS entries not yet present on the table."""
+    have = existing_columns(conn, table)
+    return [(c, d) for c, d in REPRO_COLUMNS.get(table, ()) if c.lower() not in have]
 
 
 def missing_tables(conn):
@@ -508,6 +544,47 @@ def _split_metric_key(key):
     return (name + sep + filt), is_stderr
 
 
+def env_vars_json():
+    """WORKLOAD_ENV (newline-separated KEY=VALUE) as a JSON object, or None.
+
+    This is the env vLLM was actually started with — the GPU profile's baseline
+    merged with the workload's own overrides — so it is the half of "how do I
+    reproduce this" that the commands alone do not capture.
+    """
+    raw = os.environ.get("WORKLOAD_ENV") or ""
+    pairs = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            pairs[key] = value.strip()
+    return json.dumps(pairs) if pairs else None
+
+
+def read_command(path):
+    """Read a captured command line written by the run_* helpers, or None."""
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def repro_row(command_column=None, command_path=None):
+    """The reproduction columns, populated from the environment and a command file."""
+    row = {col: (os.environ.get(env) or "").strip() or None
+           for col, env in REPRO_ENV.items()}
+    row["env_vars"] = env_vars_json()
+    if command_column:
+        row[command_column] = read_command(command_path)
+    return row
+
+
 def _metric_rows(result_id, md, results):
     """Flatten lm_eval's `results` block into (subtask, metric, value, stderr)."""
     rows = []
@@ -538,7 +615,7 @@ def _metric_rows(result_id, md, results):
     return rows
 
 
-def write_results(conn, path, md, data):
+def write_results(conn, path, md, data, command_path=None):
     """Store one lm_eval `results_*.json` plus its flattened metrics."""
     row = {
         "workload": md["workload"],
@@ -548,6 +625,7 @@ def write_results(conn, path, md, data):
         "image": md.get("image"),
         "vllm_commit": md.get("vllm_commit"),
         **_bk_row(md),
+        **repro_row("eval_command", command_path),
         "data": json.dumps(data),
         "dedupe_hash": _hash(
             md.get("buildkite_build_id"), md["workload"], md["task"], str(path)
@@ -587,9 +665,10 @@ def write_samples(conn, path, md, samples, start_index=0):
     return written
 
 
-def write_perf(conn, data, workload=None, bench_name=None):
+def write_perf(conn, data, workload=None, bench_name=None, command_path=None):
     """Store one transformed `vllm bench serve` row."""
     row = {c: None for c in PERF_COLUMNS}
+    row.update(repro_row("bench_command", command_path))
     extra = {}
     for key, value in data.items():
         if key == "nightly":
@@ -620,12 +699,39 @@ def write_perf(conn, data, workload=None, bench_name=None):
     conn.commit()
 
 
+def connect_hint(exc, config):
+    """A one-line suggestion for common connection failures, or None.
+
+    Name resolution is the usual one in CI: the database hostname is an internal
+    record, and a Kubernetes pod on cluster DNS cannot resolve it even though
+    the address itself is routable.
+    """
+    text = str(exc).lower()
+    # Wording differs by driver: pymysql surfaces the getaddrinfo text, while
+    # mysql-connector reports "Unknown MySQL server host". Match both.
+    dns_markers = (
+        "no address associated with hostname",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname",
+        "getaddrinfo",
+        "unknown mysql server host",
+        "unknown server host",
+    )
+    if any(m in text for m in dns_markers):
+        return (
+            f"hostname {config['host']!r} did not resolve. If it is an internal"
+            " record, a pod on cluster DNS cannot see it — set TIGER_SQL_HOST"
+            " to the IP address instead."
+        )
+    return None
+
+
 def open_sink(conn_file=None):
     """Resolve config and connect.
 
-    The tables are *not* created here. Schema creation is a one-time
-    administrative step (`python3 lib/sql_upload.py --create-tables`), not
-    something an eval run should attempt on every task.
+    No DDL is issued here or anywhere else in this module: the tables are
+    owned outside this repo and are expected to already exist.
     """
     config = load_config(conn_file)
     return connect(config), config
@@ -634,10 +740,8 @@ def open_sink(conn_file=None):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--create-tables", action="store_true",
-                   help="Create any missing perf-eval tables, then exit")
     p.add_argument("--check", action="store_true",
-                   help="Verify credentials and connectivity without writing")
+                   help="Verify credentials, connectivity, and the expected schema")
     p.add_argument("--conn-file", default=None,
                    help="Path to a .sqlconn file (env: SQLCONN_FILE)")
     p.add_argument("--print-schema", action="store_true",
@@ -647,9 +751,13 @@ def main():
     if args.print_schema:
         for name in SCHEMA:
             print(SCHEMA[name].strip() + ";\n")
+        for name, columns in REPRO_COLUMNS.items():
+            for column, definition in columns:
+                print(f"ALTER TABLE {name} ADD COLUMN {column} {definition};")
+            print()
         return 0
-    if not (args.create_tables or args.check):
-        p.error("nothing to do: pass --create-tables, --check, or --print-schema")
+    if not args.check:
+        p.error("nothing to do: pass --check or --print-schema")
 
     try:
         config = load_config(args.conn_file)
@@ -667,29 +775,28 @@ def main():
         return EXIT_CONFIG
     except Exception as e:  # driver-specific connection errors
         print(f"sql: connection failed: {type(e).__name__}: {e}", file=sys.stderr)
+        hint = connect_hint(e, config)
+        if hint:
+            print(f"sql: hint: {hint}", file=sys.stderr)
         return EXIT_CONNECT
 
     try:
-        if args.create_tables:
-            before = missing_tables(conn)
-            ensure_tables(conn)
-            still = missing_tables(conn)
-            if still:
-                print(f"sql: tables still missing after CREATE: {', '.join(still)}",
-                      file=sys.stderr)
-                return EXIT_STATEMENT
-            created = ", ".join(before) if before else "none"
-            print(f"sql: created: {created}")
-            print("sql: tables present: " + ", ".join(SCHEMA))
-        else:
-            absent = missing_tables(conn)
-            if absent:
-                print(f"sql: connection ok, but missing table(s): {', '.join(absent)}",
-                      file=sys.stderr)
-                print("sql: create them once with:"
-                      " python3 lib/sql_upload.py --create-tables", file=sys.stderr)
-                return EXIT_STATEMENT
-            print("sql: connection ok, all tables present")
+        absent = missing_tables(conn)
+        if absent:
+            print(f"sql: connection ok, but missing table(s): {', '.join(absent)}",
+                  file=sys.stderr)
+            print("sql: the schema is managed outside this repo — ask a DBA to"
+                  " apply `--print-schema`", file=sys.stderr)
+            return EXIT_STATEMENT
+        stale = [f"{t}.{c}" for t in REPRO_COLUMNS
+                 for c, _ in missing_columns(conn, t)]
+        if stale:
+            print(f"sql: connection ok, but missing column(s): {', '.join(stale)}",
+                  file=sys.stderr)
+            print("sql: the schema is managed outside this repo — ask a DBA to"
+                  " apply the ALTERs from `--print-schema`", file=sys.stderr)
+            return EXIT_STATEMENT
+        print("sql: connection ok, all expected tables and columns present")
     except Exception as e:
         print(f"sql: failed: {type(e).__name__}: {e}", file=sys.stderr)
         return EXIT_STATEMENT

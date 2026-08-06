@@ -15,9 +15,42 @@
 # so build output reflects server startup progress in real time. The streamer's
 # PID is held in $VLLM_LOGS_PID; stop_server kills it.
 
+# Resolve the digest of the image actually in use, exported as
+# WORKLOAD_IMAGE_DIGEST. Docker runtime asks the local daemon, which is
+# authoritative. Native runtime has no daemon — the job *is* the image — so fall
+# back to the registry's current digest for the tag, which is only the same thing
+# if the tag has not moved since the pull. Never fatal: a missing digest is
+# recorded as NULL rather than failing the run.
+resolve_image_digest() {
+  local image=$1 runtime=$2 digest=""
+  if [[ "$runtime" != "native" ]] && command -v docker >/dev/null 2>&1; then
+    digest="$(docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' \
+              "$image" 2>/dev/null || true)"
+  fi
+  if [[ -z "$digest" ]]; then
+    digest="$(python3 "$(dirname "${BASH_SOURCE[0]}")/image_digest.py" "$image" 2>/dev/null || true)"
+  fi
+  WORKLOAD_IMAGE_DIGEST="$digest"
+  export WORKLOAD_IMAGE_DIGEST
+  if [[ -n "$digest" ]]; then
+    echo "  image digest: $digest"
+  else
+    echo "  image digest: unavailable (recorded as NULL)"
+  fi
+}
+
 start_server() {
   local container=$1 port=$2 image=$3 model=$4 serve_args=$5 env=$6 runtime=${7:-docker}
   echo "--- :rocket: starting vllm: $model"
+
+  # Capture the launch command for the reproduction record before running it.
+  if [[ "$runtime" == "native" ]]; then
+    WORKLOAD_SERVE_COMMAND="vllm serve $(printf '%q' "$model") --port ${port} ${serve_args}"
+  else
+    WORKLOAD_SERVE_COMMAND="docker run --rm --gpus all --ipc=host -p ${port}:${port} $(printf '%q' "$image") $(printf '%q' "$model") --port ${port} ${serve_args}"
+  fi
+  export WORKLOAD_SERVE_COMMAND
+  echo "  serve command: $WORKLOAD_SERVE_COMMAND"
 
   if [[ "$runtime" == "native" ]]; then
     while IFS= read -r kv; do
@@ -73,6 +106,17 @@ wait_healthy() {
   while (( $(date +%s) < deadline )); do
     if curl -fs "http://localhost:${port}/health" >/dev/null 2>&1; then
       echo "server healthy"
+      # /version is the authoritative vLLM build actually serving; its
+      # `+g<sha>` suffix carries the commit even when VLLM_COMMIT was not set.
+      WORKLOAD_VLLM_VERSION="$(curl -fs "http://localhost:${port}/version" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
+      export WORKLOAD_VLLM_VERSION
+      [[ -n "$WORKLOAD_VLLM_VERSION" ]] && echo "  vllm version: $WORKLOAD_VLLM_VERSION"
+      if [[ -z "${WORKLOAD_VLLM_COMMIT:-}" && "$WORKLOAD_VLLM_VERSION" =~ \+g([0-9a-f]{7,40}) ]]; then
+        WORKLOAD_VLLM_COMMIT="${BASH_REMATCH[1]}"
+        export WORKLOAD_VLLM_COMMIT
+        echo "  vllm commit (from version): $WORKLOAD_VLLM_COMMIT"
+      fi
       return 0
     fi
     if [[ -n "${VLLM_SERVER_PID:-}" ]] && ! kill -0 "$VLLM_SERVER_PID" 2>/dev/null; then

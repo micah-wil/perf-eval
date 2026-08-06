@@ -86,14 +86,15 @@ def metadata(workload: str, task: str) -> dict:
     return md
 
 
-def ingest_results(path: Path, md: dict, endpoint: str, conn=None) -> None:
+def ingest_results(path: Path, md: dict, endpoint: str, conn=None,
+                   command_path=None) -> None:
     with path.open() as f:
         data = json.load(f)
     if endpoint:
         payload = {"kind": "results", "source_file": str(path), **md, "data": data}
         post(endpoint, payload)
     if conn is not None:
-        n = sql_upload.write_results(conn, path, md, data)
+        n = sql_upload.write_results(conn, path, md, data, command_path)
         print(f"    sql: {path.name} + {n} metric row(s)")
 
 
@@ -165,6 +166,11 @@ def main() -> int:
         default=None,
         help="Path to a .sqlconn file for --sink sql (env: SQLCONN_FILE)",
     )
+    p.add_argument(
+        "--command-file",
+        default=None,
+        help="File holding the lm_eval command line, stored for reproduction",
+    )
     args = p.parse_args()
 
     # Always state the destination. A run that used the endpoint because no SQL
@@ -220,7 +226,7 @@ def main() -> int:
     try:
         for f in results_files:
             try:
-                ingest_results(f, md, endpoint, conn)
+                ingest_results(f, md, endpoint, conn, args.command_file)
                 print(f"    uploaded {f.relative_to(root)}")
             except (urllib.error.URLError, RuntimeError, OSError) as e:
                 print(f"    failed {f.relative_to(root)}: {e}", file=sys.stderr)
