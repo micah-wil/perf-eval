@@ -179,7 +179,9 @@ TIGER_SQL_HOST  TIGER_SQL_PORT  TIGER_SQL_USER  TIGER_SQL_PASSWD  TIGER_SQL_DB
 
 Nothing in this repo logs a password: only key names and their source are printed, and the connection summary is rendered redacted.
 
-In CI, store the five values as Buildkite Secrets under exactly those names. For steps that run in a Kubernetes pod (every B200 and AMD profile), whether `buildkite-agent secret get` resolves depends on the agent stack's configuration, so the generator also wires the settings in as `secretKeyRef` entries from a cluster secret — `perf-eval-sql` by default, overridable with `SQL_SECRET_NAME`:
+In CI, store the five values as **Buildkite Secrets** under exactly those names. The generator emits a step-level `secrets:` block listing them, and Buildkite injects each into the job environment under the same name — that is the primary path and it covers agent-run and Kubernetes steps alike. Two constraints come from Buildkite: it needs **agent 3.106.0 or later**, and secrets are **cluster-scoped**, so they must live in the cluster backing that step's queue (the AMD workloads use the `perf_eval` / `mi300_perf_eval` queues).
+
+As a fallback for clusters where that is unavailable, Kubernetes steps also get `secretKeyRef` entries from a cluster secret — `perf-eval-sql` by default, overridable with `SQL_SECRET_NAME`. Either source satisfies the loader, since the environment is read first:
 
 ```bash
 kubectl create secret generic perf-eval-sql \
@@ -191,9 +193,11 @@ kubectl create secret generic perf-eval-sql \
   --from-literal=TIGER_SQL_DB=...
 ```
 
-Every ref is `optional: true`, so a missing secret yields the loader's `missing credentials` abort rather than a pod that won't schedule. Either source satisfies the loader, and credentials are never written into the generated pipeline YAML.
+Every ref is `optional: true`, so a missing Kubernetes secret leaves the variables unset rather than blocking the pod from scheduling. That is deliberate, but it means a missing secret degrades **silently**: with no `TIGER_SQL_DB` visible, the destination falls back to the endpoint. `run.sh` prints a `sql-debug:` block naming every setting it found and every source it checked, so a run that went to the wrong place is diagnosable from the log. Pass `INGEST_SINK=sql` to turn that fallback into an immediate failure instead.
 
-`SQL_HOST` may be given as a bare hostname or a URL; a `http://`/`https://`/`mysql://` scheme, trailing path, and embedded port are all normalized away before the driver sees it.
+Credentials are never written into the generated pipeline YAML — only the secret *names* appear.
+
+`TIGER_SQL_HOST` may be given as a bare hostname or a URL; a `http://`/`https://`/`mysql://` scheme, trailing path, and embedded port are all normalized away before the driver sees it.
 
 A MySQL driver is required: `pymysql` (preferred, and installed by the pipeline's setup step) or `mysql-connector-python`.
 

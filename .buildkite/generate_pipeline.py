@@ -13,11 +13,16 @@ Override env vars are propagated to each step:
   BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
   INGEST_SINK  ingestion destination: endpoint (default), sql, or both
 
-When INGEST_SINK selects the SQL destination, the TIGER_SQL_* connection
-settings are read from Buildkite Secrets at run time by lib/sql_conn.sh — no
-credential is ever written into the generated pipeline. For steps that run in
-Kubernetes the settings are also wired in as ``secretKeyRef`` entries pointing
-at the SQL_SECRET_NAME secret.
+The TIGER_SQL_* connection settings reach the job two ways, and no credential is
+ever written into the generated pipeline:
+
+  1. a step-level ``secrets:`` block, which Buildkite injects into the job
+     environment under the same names (needs agent 3.106.0+, and the secrets are
+     cluster-scoped so they must live in the cluster backing the step's queue)
+  2. for Kubernetes steps, ``secretKeyRef`` entries pointing at the
+     SQL_SECRET_NAME secret — a fallback for clusters where (1) is unavailable
+
+Both are emitted unless INGEST_SINK=endpoint rules SQL out for the whole build.
 
 Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
 without forcing the whole build to skip lm_eval.
@@ -100,6 +105,18 @@ def sql_secrets_wanted():
     SQL out for the whole build, suppresses them.
     """
     return (os.environ.get("INGEST_SINK") or "").strip().lower() != "endpoint"
+
+
+def sql_step_secrets():
+    """Buildkite Secrets to inject into the job environment.
+
+    Each key is injected as an environment variable of the same name, which is
+    what lib/sql_conn.sh reads first. This is the supported declarative path and
+    covers agent-run and Kubernetes steps alike; it needs agent 3.106.0+, and the
+    secrets are cluster-scoped, so they must live in the cluster backing the
+    step's queue.
+    """
+    return list(SQL_ENV_VARS)
 
 
 def sql_secret_env():
@@ -330,6 +347,11 @@ def make_step(path, data, profiles):
         "commands": setup_commands + [RUN_TEMPLATE.format(path=path)],
         "artifact_paths": ["results/**/*"],
     }
+    if sql_secrets_wanted():
+        # Buildkite injects each of these into the job environment under the
+        # same name. This is the primary path; the Kubernetes secretKeyRef
+        # entries below are a fallback for clusters where it is unavailable.
+        step["secrets"] = sql_step_secrets()
     if profile.get("server_runtime") == "native":
         kind = profile.get("k8s_plugin")
         if not kind:
