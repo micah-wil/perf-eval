@@ -7,19 +7,22 @@ projects it into shell variables: top-level metadata, server config
 (image, model, serve_args, env, runtime), the lm_eval task list, the
 vllm_bench config list, and bench ingest metadata (device/tp/precision).
 
-Image precedence: VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
-`vllm/vllm-openai:latest`. When BENCH_ONLY is truthy, lm_eval task names
+The image comes from images.py, which routes a build's image pins to the
+platform of the workload's GPU. When BENCH_ONLY is truthy, lm_eval task names
 are not validated against the registry (because they will not run).
 """
 
 import base64
 import json
 import os
-import re
 import shlex
 import sys
 
 import yaml
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import images  # noqa: E402  (needs this file's directory on sys.path)
 
 TASK_FIELDS = {"name", "num_fewshot", "model_args"}
 BENCH_FIELDS = {
@@ -73,17 +76,6 @@ def env_truthy(name: str) -> bool:
     return os.environ.get(name, "").lower() in {"1", "true", "yes"}
 
 
-def commit_from_image(image: str) -> str:
-    """Extract a commit SHA from an image tag, if one is embedded."""
-    _, sep, tag = image.rpartition(":")
-    if not sep:
-        return ""
-    tag = tag.split("@", 1)[0]
-    m = (re.match(r"nightly-([0-9a-f]{7,40})(?:[-_.].*)?$", tag, re.IGNORECASE)
-         or re.search(r"(?:^|[-_.])([0-9a-f]{12,40})(?:$|[-_.])", tag, re.IGNORECASE))
-    return m.group(1) if m else ""
-
-
 def known_task_names() -> set:
     try:
         from lm_eval.tasks import TaskManager
@@ -102,24 +94,15 @@ def load_profile(gpu: str, workload_path: str) -> dict:
     return profiles[gpu]
 
 
-def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
-    """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload."""
-    override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
-    override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
-    # ROCm images are located at vllm/vllm-openai-rocm. The default
-    # images (CUDA) are stored at vllm/vllm-openai
-    custom_repo = (profile.get("image_repo") or "").strip()
-    repo = custom_repo or "vllm/vllm-openai"
-    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
-    if override_image and (not custom_repo or "rocm" in override_image.lower()):
-        return override_image, override_commit or commit_from_image(override_image)
-
-    commit = override_commit or commit_from_image(override_image)
-    if commit:
-        return f"{repo}:nightly-{commit}", commit
-
-    image = vllm.get("image", f"{repo}:nightly")
-    return image, commit_from_image(str(image))
+def resolve_image(vllm: dict, profile: dict, path: str) -> tuple[str, str]:
+    """The image and vLLM commit for this workload, or exit saying why not."""
+    try:
+        resolved = images.resolve(vllm, profile)
+    except ValueError as e:
+        sys.exit(f"{path}: {e}")
+    if resolved.unavailable:
+        sys.exit(f"{path}: {resolved.unavailable}")
+    return resolved.image, resolved.commit
 
 
 def parse_tp(serve_args: str) -> int:
@@ -358,7 +341,7 @@ def main(path: str) -> None:
     if bfcl:
         validate_bfcl(bfcl, serve_args, path)
 
-    image, vllm_commit = resolve_image(vllm, profile)
+    image, vllm_commit = resolve_image(vllm, profile, path)
     env = {**(profile.get("env") or {}), **(vllm.get("env") or {})}
     if "HF_HOME" not in env and profile.get("hf_home"):
         env["HF_HOME"] = profile["hf_home"]

@@ -3,12 +3,16 @@
 
 Run with ``python3 .buildkite/test_generate_pipeline.py`` (needs only pyyaml,
 which the pipeline already installs). No pytest / GPU / network required.
+Image resolution itself is covered by ``python3 lib/test_images.py``.
 
-Guards the HF-cache volume behaviour: the AMD k8s plugin must NOT emit a
-root-disk hostPath by default (that leaked model caches onto node root disks),
-and the volume source must be overridable per-cluster.
+Guards two things. The HF-cache volume behaviour: the AMD k8s plugin must NOT
+emit a root-disk hostPath by default (that leaked model caches onto node root
+disks), and the volume source must be overridable per-cluster. And how a step
+carries its image: every step is pinned to the image its platform resolved to,
+and a platform with no image in this build produces a skipped step.
 """
 
+import contextlib
 import importlib.util
 import os
 import sys
@@ -19,6 +23,26 @@ spec = importlib.util.spec_from_file_location(
 )
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
+
+IMAGE_VARS = ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM", "VLLM_COMMIT")
+
+
+@contextlib.contextmanager
+def build_env(**pins):
+    saved = {k: os.environ.pop(k, None) for k in IMAGE_VARS}
+    os.environ.update(pins)
+    try:
+        yield
+    finally:
+        for k in IMAGE_VARS:
+            os.environ.pop(k, None)
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
+
+
+def _step(gpu, **extra):
+    data = {"name": f"test-{gpu.lower()}", "gpu": gpu, "num_gpus": 8,
+            "vllm": {"model": "test/model"}, "vllm_bench": {"configs": []}, **extra}
+    return g.make_step(f"workloads/test_{gpu.lower()}.yaml", data, g.load_profiles())
 
 
 def _amd_volumes(profile, gpu="MI300X"):
@@ -98,6 +122,34 @@ def test_shipped_amd_profiles_have_no_rootdisk_hostpath():
         assert not hf_home.startswith("/mnt/shared"), (
             f"{gpu} hf_home={hf_home!r} would land on the node root disk"
         )
+
+
+def test_step_is_pinned_to_its_platform_image():
+    """A ROCm step runs the ROCm pin — in its pod spec and in the env the job
+    re-reads — even when the CUDA pin's name looks nothing like it."""
+    with build_env(
+        VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2",
+        VLLM_IMAGE_ROCM="other.registry/amd-vllm:rc2-final",
+        VLLM_COMMIT="abc1234def5678",
+    ):
+        amd, nvidia = _step("MI355X"), _step("H200")
+    pod_image = amd["plugins"][0]["kubernetes"]["podSpecPatch"]["containers"][0]["image"]
+    assert pod_image == "other.registry/amd-vllm:rc2-final", pod_image
+    assert amd["env"]["VLLM_IMAGE_ROCM"] == "other.registry/amd-vllm:rc2-final"
+    assert nvidia["env"]["VLLM_IMAGE_CUDA"] == "myrepo/vllm:v0.12.0rc2"
+    assert "VLLM_IMAGE_ROCM" not in nvidia["env"]
+
+
+def test_step_is_skipped_when_its_platform_has_no_image():
+    """A CUDA-only release candidate leaves AMD workloads visible-but-skipped
+    rather than running them against an unrelated image."""
+    with build_env(VLLM_IMAGE="myrepo/vllm:v0.12.0rc2", VLLM_COMMIT="abc1234def5678"):
+        amd = _step("MI355X")
+    assert amd["skip"], amd
+    assert "VLLM_IMAGE_ROCM" in amd["skip"]
+    assert len(amd["skip"]) <= 70, "Buildkite caps skip reasons at 70 chars"
+    assert "plugins" not in amd, "a skipped step must not name an image to pull"
+    assert "VLLM_IMAGE_ROCM" not in (amd.get("env") or {})
 
 
 def main():

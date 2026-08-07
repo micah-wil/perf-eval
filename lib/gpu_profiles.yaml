@@ -1,5 +1,12 @@
+# `platform` picks which of a build's VLLM_IMAGE_<PLATFORM> pins a workload uses,
+# and the default image repo (cuda → vllm/vllm-openai,
+# rocm → vllm/vllm-openai-rocm). Defaults to cuda; override the repo per profile
+# with `image_repo`, and the release tag suffix perf-eval looks for
+# (cuda → <sha>-x86_64, rocm → <sha>-rocm) with `release_tag_suffix`.
+
 H200:
   queue: H200
+  platform: cuda
   hf_home: /mnt/shared/hf-models
   env:
     # Skip the multi-minute DeepGEMM warmup; kernels are still available
@@ -8,6 +15,7 @@ H200:
 
 B200:
   queue: b200-k8s
+  platform: cuda
   hf_home: /mnt/shared/hf_cache
   server_runtime: native
   k8s_plugin: nvidia
@@ -17,7 +25,7 @@ B200:
 
 MI300X:
   queue: mi300_perf_eval
-  image_repo: vllm/vllm-openai-rocm
+  platform: rocm
   server_runtime: native
   k8s_plugin: amd
   # HF cache lives in the container default and is backed by an emptyDir volume
@@ -28,7 +36,7 @@ MI300X:
 
 MI355X:
   queue: mi355_perf_eval
-  image_repo: vllm/vllm-openai-rocm
+  platform: rocm
   server_runtime: native
   k8s_plugin: amd
   # See MI300X — HF cache defaults to an emptyDir-backed container path; override
