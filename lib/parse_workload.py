@@ -215,10 +215,6 @@ def encode_bench_args(args: object, config_name: str, path: str) -> str:
     return base64.b64encode(payload).decode()
 
 
-def _positive_int(value: object) -> bool:
-    return isinstance(value, int) and value > 0
-
-
 def expand_bench_config(c: dict, path: str) -> list:
     """Expand a bench config's concurrency sweep into concrete runs.
 
@@ -238,12 +234,6 @@ def expand_bench_config(c: dict, path: str) -> list:
     concs = mc if is_sweep else [mc]
     if is_sweep and not concs:
         sys.exit(f"{path}: vllm_bench config {name!r} has an empty max_concurrency list")
-    for v in concs:
-        if not _positive_int(v):
-            sys.exit(
-                f"{path}: vllm_bench config {name!r} max_concurrency must be a positive "
-                f"integer or a list of positive integers"
-            )
 
     if isinstance(npr, list):
         if not is_sweep:
@@ -260,7 +250,7 @@ def expand_bench_config(c: dict, path: str) -> list:
     else:
         nprompts = [npr] * len(concs)
     for v in nprompts:
-        if not _positive_int(v):
+        if not (isinstance(v, int) and v > 0):
             sys.exit(
                 f"{path}: vllm_bench config {name!r} num_prompts must be a positive integer "
                 f"(or a list of them matching max_concurrency)"
