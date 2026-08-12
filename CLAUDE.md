@@ -68,6 +68,22 @@ list is declared in three places that must stay in sync: `CONN_KEYS` in
 `lib/sql_upload.py`, `SQL_CONN_KEYS` in `lib/sql_conn.sh`, and `SQL_ENV_VARS` in
 `.buildkite/generate_pipeline.py`.
 
+**Backfilling a build** — `lib/scrapper.py` pulls a finished build's artifacts
+off Buildkite and ingests them, for runs whose upload could not happen. It needs
+the `bk` CLI and `BUILDKITE_API_TOKEN`; it never calls the Buildkite API with
+`curl`. Resumable via `--state`, and every write is an upsert, so re-running a
+build is safe:
+
+```bash
+python3 lib/scrapper.py --build 46
+python3 lib/scrapper.py --range 30-46 --state /tmp/scrape.json --dry-run
+```
+
+`--reconstruct-commands` re-derives `bench_command`/`eval_command` for builds
+older than the command capture by driving the current `run_*` helpers with a
+stubbed binary. That is exact only while those helpers build the same command
+line — diff them against the build's commit before trusting it.
+
 A configured `TIGER_SQL_DB` makes SQL the destination on its own — no
 `INGEST_SINK` needed. Set `INGEST_SINK=endpoint` to force the public endpoint, or
 `both` to write to each.

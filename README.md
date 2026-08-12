@@ -8,7 +8,7 @@ Each recipe is one `(model, hardware, set of tasks)` combination. The Buildkite 
 
 ```
 workloads/        one YAML per (model, hardware) recipe
-lib/              orchestrator (run.sh), helpers, GPU profiles, ingestion sinks
+lib/              orchestrator (run.sh), helpers, GPU profiles, ingestion sinks, scrapper.py
 .buildkite/       pipeline bootstrap, step generator, and its tests
 .sqlconn          local-only SQL credentials (gitignored; see Ingestion destinations)
 CLAUDE.md         agent conventions and detailed Buildkite workflow
@@ -154,6 +154,30 @@ Every table carries the workload, task, image, vLLM commit, `nightly` flag, and 
 | `bench_command` / `eval_command` | the exact `vllm bench serve` / `lm_eval` line, captured as it ran |
 
 The two command columns come from `.cmd` files the run helpers write next to each result, so they are the real invocation rather than a reconstruction.
+
+### Backfilling a build into SQL
+
+When a run could not upload — database unreachable, credentials missing, or a build that predates the SQL sink — the results are still attached to the build as Buildkite artifacts. `lib/scrapper.py` pulls them back down and ingests them after the fact:
+
+```bash
+python3 lib/scrapper.py --build 46                    # one build
+python3 lib/scrapper.py --range 30-46 --state /tmp/scrape.json   # many, resumable
+python3 lib/scrapper.py --build 46 --no-samples --dry-run
+```
+
+For each passed job it resolves the workload's settings with **that build's own** `parse_workload.py` (so per-commit workload edits are honoured), downloads the job's artifacts, and hands them to `ingest_perf.py` / `ingest.py` with the build's provenance in the environment. Artifacts are deleted after each job, so disk never holds more than one job's worth, and every write is a `dedupe_hash` upsert, so re-running a build updates its rows instead of duplicating them.
+
+It needs the [`bk` CLI](https://buildkite.com/docs/platform/cli) on `PATH` (or `--bk`) with `BUILDKITE_API_TOKEN` set, the same SQL settings as any other ingest, and git able to resolve each build's commit. Useful flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--no-samples` | Skip `samples_*.jsonl`, which are ~99% of the download |
+| `--only-workload NAME` | Restrict to specific workloads; repeatable |
+| `--state FILE` | Record finished jobs so an interrupted scrape resumes |
+| `--dry-run` | Report what would be uploaded without writing |
+| `--reconstruct-commands` | Re-derive `bench_command` / `eval_command` for builds older than the command capture. Only correct while the `run_*` helpers build the same command line — check `git diff` on `lib/run_vllm_bench.sh` and `lib/run_lm_eval.sh` first, which is why it is opt-in |
+
+`image_digest` is only recorded when the build's image tag is commit-pinned (`nightly-<sha>`). A moving tag like `:nightly` may point somewhere else by the time you scrape, so it is left NULL rather than recorded wrongly.
 
 **Ingestion never fails a run.** Every upload path is best-effort: a missing credential, an unreachable host, or a rejected write is logged loudly and the run continues. Results are always written under `results/` and uploaded as Buildkite artifacts, so anything that did not reach SQL can be loaded afterwards from the artifacts of that build. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
 

@@ -496,7 +496,17 @@ def _insert_many(conn, table, rows):
     with conn.cursor() as cur:
         for start in range(0, len(rows), INSERT_BATCH_ROWS):
             chunk = rows[start:start + INSERT_BATCH_ROWS]
-            cur.executemany(sql, [[r[c] for c in cols] for r in chunk])
+            params = [[r[c] for c in cols] for r in chunk]
+            try:
+                cur.executemany(sql, params)
+            except Exception:
+                # Some drivers rewrite executemany into one multi-row INSERT and
+                # can mangle it on certain payloads (mysql-connector has been
+                # seen to emit a 1064 on sample text). Fall back to one
+                # statement per row so a single awkward record cannot cost the
+                # whole file; the upsert makes the retry harmless.
+                for row in params:
+                    cur.execute(sql, row)
             written += len(chunk)
     return written
 
