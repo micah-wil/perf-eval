@@ -134,7 +134,9 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 
 **Optional env vars:**
 
-- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image` — and leaves the other platform alone.
+- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image`.
+
+  Pin one platform and the other's workloads are **skipped** (`no ROCM image: set VLLM_IMAGE_ROCM`), on the grounds that a build naming its images per platform names every platform it wants run: benchmarking whatever else was lying around and labelling it with this build's commit is worse than not running. Set `VLLM_IMAGE` alongside the pin to cover the rest, or pin both platforms. Skipped steps are hidden in the build view until you toggle *Skipped jobs*.
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
 

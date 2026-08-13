@@ -146,12 +146,42 @@ def test_platform_pin_wins_over_other_selection():
         assert g.resolved_image(data, ROCM) == "myrepo/rocm:pin"
 
 
-def test_one_platform_pin_leaves_the_other_alone():
-    """Pinning ROCm must not change what CUDA workloads resolve to."""
+def test_platform_without_a_pin_is_skipped():
+    """A build that pins one platform and not the other has nothing to run on
+    the other: skip it rather than benchmark an image the build didn't name."""
+    with build_env(VLLM_IMAGE_ROCM="myrepo/rocm:pin", VLLM_COMMIT="abc1234def5678"):
+        assert g.resolved_image({}, CUDA) == ""
+        step = g.make_step(
+            "workloads/test.yaml", {"name": "t", "gpu": "H200"}, g.load_profiles()
+        )
+    assert step["skip"] == "no CUDA image: set VLLM_IMAGE_CUDA"
+    assert len(step["skip"]) <= 70, "Buildkite caps skip reasons at 70 chars"
+    assert "plugins" not in step, "a skipped step must not name an image to pull"
+
+
+def test_generic_image_covers_the_platform_without_a_pin():
+    """VLLM_IMAGE is the fallback that keeps the unpinned platform running — for
+    AMD, via the ROCm nightly of the same commit, as it does without any pins."""
     with build_env(
-        VLLM_IMAGE_ROCM="myrepo/rocm:pin", VLLM_COMMIT="abc1234def5678"
+        VLLM_IMAGE="vllm/vllm-openai:nightly-abc1234def5678",
+        VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2",
+        VLLM_COMMIT="abc1234def5678",
+    ):
+        assert g.resolved_image({}, ROCM) == (
+            "vllm/vllm-openai-rocm:nightly-abc1234def5678"
+        )
+
+
+def test_no_pins_still_runs_every_platform():
+    """The nightly build sets no per-platform pins, and nothing about it changes."""
+    with build_env(
+        VLLM_IMAGE="vllm/vllm-openai:nightly-abc1234def5678",
+        VLLM_COMMIT="abc1234def5678",
     ):
         assert g.resolved_image({}, CUDA) == "vllm/vllm-openai:nightly-abc1234def5678"
+        assert g.resolved_image({}, ROCM) == (
+            "vllm/vllm-openai-rocm:nightly-abc1234def5678"
+        )
 
 
 def test_platform_pins_are_passed_to_the_step():

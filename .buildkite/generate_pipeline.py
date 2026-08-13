@@ -11,7 +11,9 @@ Override env vars are propagated to each step:
   VLLM_IMAGE   full docker image URI; overrides workload's vllm.image
   VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM
                that platform's image URI; overrides everything below, for a
-               build whose CUDA and ROCm images are unrelated artifacts
+               build whose CUDA and ROCm images are unrelated artifacts. A
+               platform with no pin of its own and no VLLM_IMAGE to fall back
+               on has its workloads emitted as skipped steps.
   VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
   BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
 
@@ -93,25 +95,46 @@ def commit_from_image(image):
     return m.group(1) if m else ""
 
 
-def platform_image(repo):
+def platform_of(profile):
+    """The platform a profile runs, from the repo its images come from."""
+    repo = (profile.get("image_repo") or "").strip() or DEFAULT_IMAGE_REPO
+    return "ROCM" if "rocm" in repo.lower() else "CUDA"
+
+
+def platform_image(profile):
     """VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM — this platform's image, if pinned.
 
     For a build whose platforms are separate artifacts with unrelated tags,
     which nothing else here can name.
     """
-    platform = "ROCM" if "rocm" in repo.lower() else "CUDA"
-    return (os.environ.get(f"VLLM_IMAGE_{platform}") or "").strip()
+    return (os.environ.get(f"VLLM_IMAGE_{platform_of(profile)}") or "").strip()
+
+
+def pins_only_other_platforms(profile):
+    """True when the build pins per-platform images, but not this platform's."""
+    mine = f"VLLM_IMAGE_{platform_of(profile)}"
+    return any(
+        (os.environ.get(k) or "").strip()
+        for k in ("VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM")
+        if k != mine
+    )
 
 
 def resolved_image(data, profile):
+    """This workload's image, or "" if its platform has none in this build."""
     vllm = data.get("vllm") or {}
     override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or DEFAULT_IMAGE_REPO
-    pinned = platform_image(repo)
+    pinned = platform_image(profile)
     if pinned:
         return pinned
+    # A build pinning images per platform names every platform it wants run, so
+    # with no pin of ours and no VLLM_IMAGE to fall back on there is nothing
+    # representative to benchmark: the caller skips this workload.
+    if pins_only_other_platforms(profile) and not override_image:
+        return ""
     # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
     if override_image and (not custom_repo or "rocm" in override_image.lower()):
         return override_image
@@ -296,7 +319,13 @@ def make_step(path, data, profiles):
         "commands": setup_commands + [RUN_TEMPLATE.format(path=path)],
         "artifact_paths": ["results/**/*"],
     }
-    if profile.get("server_runtime") == "native":
+    image = resolved_image(data, profile)
+    if not image:
+        # Skipped, not dropped: a platform the build didn't pin an image for is
+        # then visible in the build view instead of quietly missing from it.
+        platform = platform_of(profile)
+        step["skip"] = f"no {platform} image: set VLLM_IMAGE_{platform}"
+    elif profile.get("server_runtime") == "native":
         kind = profile.get("k8s_plugin")
         if not kind:
             sys.exit(
@@ -306,8 +335,9 @@ def make_step(path, data, profiles):
         builder = K8S_PLUGINS.get(kind)
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
-        image = ecr_pull_through(resolved_image(data, profile))
-        step["plugins"] = [builder(image, data.get("num_gpus", 1), profile, gpu)]
+        step["plugins"] = [
+            builder(ecr_pull_through(image), data.get("num_gpus", 1), profile, gpu)
+        ]
     step_env = {
         k: os.environ[k]
         for k in ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM",
