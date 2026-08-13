@@ -20,30 +20,18 @@ This applies to non-trivial changes (new code, refactors, design decisions). Pur
 
 You cannot run a real eval locally — it needs a GPU host with Docker, vLLM, and lm-eval installed. What you *can* run locally:
 
-**Unit tests** — stdlib + pyyaml only, no GPU or network:
-
-```bash
-python3 .buildkite/test_generate_pipeline.py && python3 lib/test_images.py && python3 lib/test_registry.py
-```
-
-**Parser smoke test** — run the parser with a stubbed `lm_eval` registry to verify TSV output and validation behavior. The stub avoids needing `lm-eval` installed; populate `all_tasks` with the names referenced by the YAML under test. Set `VLLM_IMAGE` / `VLLM_IMAGE_ROCM` to check image resolution for a given build:
+**Parser smoke test** — exec the parser with a stubbed `lm_eval` registry to verify TSV output and validation behavior. The stub avoids needing `lm-eval` installed; populate `all_tasks` with the names referenced by the YAML under test:
 
 ```bash
 python3 -c "
-import runpy, sys, types
+import sys, types
 m = types.ModuleType('lm_eval'); t = types.ModuleType('lm_eval.tasks')
 class TM: all_tasks = ['gsm8k', 'aime25']
 t.TaskManager = TM
 sys.modules['lm_eval'] = m; sys.modules['lm_eval.tasks'] = t
 sys.argv = ['parse_workload.py', 'workloads/qwen3_5_h200.yaml']
-runpy.run_path('lib/parse_workload.py', run_name='__main__')
+exec(open('lib/parse_workload.py').read())
 "
-```
-
-**Generated pipeline** — dumps the steps a build would run; the stderr summary lists the image each step resolved to (or why it is skipped). This one does reach the network, to confirm any image it derived rather than was given actually exists:
-
-```bash
-VLLM_COMMIT=<sha> VLLM_IMAGE=<uri> python3 .buildkite/generate_pipeline.py >/dev/null
 ```
 
 **Shell syntax** — catches typos in the orchestrator and helpers without executing them:
@@ -81,7 +69,7 @@ Pipeline metadata:
    - `commit: "<full SHA>"`
    - `branch: "<branch name>"` (use the actual branch, not `main`, when testing a feature branch)
    - `message: "<short description of what this tests>"` — match the existing convention: short, action-oriented (e.g. "Add gpqa diamond", "Writable HF_HOME for lm_eval datasets cache"). No emoji unless the user asks.
-   - `environment`: always pass both `VLLM_COMMIT` (the vLLM SHA being tested) and `VLLM_IMAGE` (the full Docker image URI). One image is usually enough: a release-pipeline or nightly tag lets every other platform be derived from it. Pass `VLLM_IMAGE_ROCM` (or `VLLM_IMAGE_CUDA`) when an image follows neither convention, or the workloads for that platform will be skipped — see "Pinning the vLLM image" in the README. Optionally pass `WORKLOADS` for an explicit workload list; omit it to run all `nightly: true` workloads.
+   - `environment`: always pass both `VLLM_COMMIT` (the vLLM SHA being tested) and `VLLM_IMAGE` (the full Docker image URI). When CUDA and ROCm are unrelated artifacts, pass `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` instead — each overrides all other image selection for its platform. Optionally pass `WORKLOADS` for an explicit workload list; omit it to run all `nightly: true` workloads.
 
    With `bk` (run `bk auth status` first):
 
@@ -96,9 +84,6 @@ Pipeline metadata:
      --env "VLLM_IMAGE=<full Docker image URI>" \
      --env "WORKLOADS=<optional workload list>"
    ```
-
-   For images that can't be derived from one another, swap `VLLM_IMAGE` for
-   `--env "VLLM_IMAGE_CUDA=<uri>" --env "VLLM_IMAGE_ROCM=<uri>"`.
 
    Omit the final `WORKLOADS` argument to run every `nightly: true` workload.
 3. **Report the build URL** back to the user immediately so they can follow

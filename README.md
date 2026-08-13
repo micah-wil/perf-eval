@@ -44,7 +44,7 @@ nightly: true            # include in the nightly schedule (default: false)
 
 vllm:                    # how the server is brought up
   model: Qwen/Qwen3.5-397B-A17B-FP8
-  image: vllm/vllm-openai:nightly      # optional; only used when the build pins no image of its own
+  image: vllm/vllm-openai:nightly      # optional; falls back to VLLM_IMAGE / VLLM_COMMIT / latest
   env:                                  # optional; merged over the GPU profile's env
     SOME_VAR: value
   serve_args: >-                        # appended to `vllm serve <model>`; word-split
@@ -91,7 +91,7 @@ vllm_bench:              # perf runs (optional) — fed to the perf dashboard
 
 A few things worth knowing:
 
-- **`gpu`** must match a key in `lib/gpu_profiles.yaml`. The profile sets the Buildkite queue, the platform (`cuda` or `rocm` — which of the build's images this workload runs, see [Pinning the vLLM image](#pinning-the-vllm-image)), the HF cache path, and baseline env vars.
+- **`gpu`** must match a key in `lib/gpu_profiles.yaml`. The profile sets the Buildkite queue, default image, HF cache path, and baseline env vars.
 - **`nightly`** controls only the nightly schedule. Recipes with `nightly: false` (or omitted) are still triggerable explicitly via the `WORKLOADS` env var.
 - **`lm_eval.tasks` is a list** because each entry runs as a separate `lm_eval` invocation — `--num_fewshot` is a single global flag, so different shot counts need separate runs. Each task's results land in `results/<name>/<task-name>/`.
 - **`vllm_bench` runs first** if both blocks are present — that way perf-pipeline bugs surface quickly instead of waiting on a full lm-eval pass.
@@ -119,7 +119,7 @@ A cluster with fast shared storage can keep a warm, cross-run cache by overridin
 
 Do **not** set an `hf_home` under a node path like `/mnt/shared` unless that path is a real mount on every node in the queue — with the default `emptyDir` that only changes the in-pod path, but if you also point the volume at a `hostPath`, an unmounted path lands the cache on the node root disk with no reclamation.
 
-Run the tests with `python3 .buildkite/test_generate_pipeline.py`, `python3 lib/test_images.py`, and `python3 lib/test_registry.py` (stdlib + pyyaml only; no GPU or network needed).
+Run the generator's tests with `python3 .buildkite/test_generate_pipeline.py` (stdlib + pyyaml only; no GPU needed).
 
 ### Trigger a Buildkite build
 
@@ -127,14 +127,14 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 
 **From the UI:** open the pipeline → New Build → pick branch and commit (must be pushed to GitHub) → optionally fill Environment Variables to scope the run → Create Build.
 
-**Required env vars** — every build has to say which vLLM build it is testing:
+**Required env vars** — both must be set on every build:
 
 - `VLLM_COMMIT` — vLLM commit SHA being tested. Used to tag results and track which vLLM version produced them.
-- `VLLM_IMAGE` — full Docker image URI (e.g. `vllm/vllm-openai:nightly-abc1234`), or the per-platform `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` below when CUDA and ROCm are different artifacts. See [Pinning the vLLM image](#pinning-the-vllm-image) for how an image reaches AMD and NVIDIA workloads.
+- `VLLM_IMAGE` — full Docker image URI (e.g. `vllm/vllm-openai:nightly-abc1234`). This is the image that gets pulled and run. AMD workloads use it only if the ref names a ROCm image; otherwise they fall back to `vllm/vllm-openai-rocm:nightly-<VLLM_COMMIT>`.
 
 **Optional env vars:**
 
-- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — per-platform images, for builds whose platform images can't be derived from one another.
+- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image` — and leaves the other platform alone.
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
 
@@ -151,33 +151,6 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 4. Click **Create Build**.
 
 This runs the `qwen3_5_h200` workload against the specified vLLM nightly image. Omit `WORKLOADS` to run all `nightly: true` workloads.
-
-### Pinning the vLLM image
-
-vLLM ships one image per platform, and their tags need not resemble each other — a release candidate might be `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm. So a build pins an image *per platform*, and each workload runs the image for its GPU's `platform` (`cuda` for H200/B200, `rocm` for MI300X/MI355X — set in `lib/gpu_profiles.yaml`).
-
-For one platform, in precedence order:
-
-1. `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — an explicit pin for that platform. Any registry, any tag.
-2. `VLLM_IMAGE` — a single image, applied to the platform its name identifies (`rocm` anywhere in the ref means ROCm, otherwise CUDA). This is the common case: one nightly image covers everything.
-3. **The same release build's tag for this platform.** The release pipeline publishes every platform of a build into one repo as `<sha>-<suffix>` — `…/vllm-release-repo:<sha>-x86_64` alongside `…:<sha>-rocm` — so pinning one platform locates the others. Suffixes live in `RELEASE_TAG_SUFFIX` in `lib/images.py`; a profile can override its own with `release_tag_suffix` (an ARM CUDA queue would want `aarch64`).
-4. The nightly build of the pinned commit — `vllm/vllm-openai[-rocm]:nightly-<VLLM_COMMIT>` — when the build is testing nightlies anyway (every pinned image is `nightly`-tagged, or nothing is pinned). This is what keeps AMD covered on a nightly run that only passes a CUDA image.
-5. The workload's own `vllm.image`, then `vllm/vllm-openai[-rocm]:nightly`. Only when the build pins nothing at all — typically a local run.
-
-`VLLM_COMMIT` is the revision under test on every platform, and is what gets recorded with the results. If it isn't set, a commit embedded in the resolved image's tag is used.
-
-Rule 3 means the usual release-candidate checkout needs no new variables — the `VLLM_COMMIT` and CUDA `VLLM_IMAGE` the release manager already passes cover AMD as well:
-
-```
-VLLM_COMMIT=e5949f10009c8b1803e2e37f5610b4dd047d432f
-VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-release-repo:e5949f10009c8b1803e2e37f5610b4dd047d432f-x86_64
-```
-
-`VLLM_IMAGE_ROCM` is then only needed for an image that doesn't follow that convention — a one-off build, a private mirror, an image whose tag shares nothing with its CUDA counterpart.
-
-**A derived ref (rule 3 or 4) is checked against the registry before it is scheduled.** Not every release build publishes every platform, so a guess can be wrong; when the tag isn't there the workload becomes a skipped step (`no ROCM image built for 7794b1e08bf5`) instead of queueing a GPU job that dies on `docker pull` an hour later. Only a registry answering *not found* rejects a ref: an unreachable registry, a rate limit, or one that needs credentials all count as present, so a flaky check can never quietly drop coverage. Images you pinned yourself are never second-guessed.
-
-**When a platform has no image at all, its workloads are skipped, not silently retargeted.** If a build pins a custom image that nothing can be derived from, platforms without a pin have nothing representative to run: benchmarking last night's image and labelling it with the release candidate's commit is worse than not running. Those workloads become skipped steps whose reason says which variable to set (`needs a ROCM image: set VLLM_IMAGE_ROCM`). Skipped steps are hidden until you toggle *Skipped jobs* in the build view; the bootstrap step's log also lists the image every step resolved to.
 
 **From an agent:** see `CLAUDE.md` for the Buildkite MCP and authenticated
 `bk` workflows. Don't make raw Buildkite API calls with `curl`.

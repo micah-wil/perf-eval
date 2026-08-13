@@ -7,31 +7,26 @@ Always emits one GPU-profiled step per selected workload. Selection rules:
                              separated; resolved against workloads/*.yaml)
   Otherwise               → run every workload with ``nightly: true``
 
-Each step is pinned to the image its GPU's platform resolves to (see
-lib/images.py for the VLLM_IMAGE / VLLM_IMAGE_ROCM / VLLM_COMMIT precedence);
-refs derived rather than pinned are checked against the registry first. A
-workload whose platform has no image in this build is emitted as a skipped
-step, so the coverage gap is visible in the build instead of silently missing.
+Override env vars are propagated to each step:
+  VLLM_IMAGE   full docker image URI; overrides workload's vllm.image
+  VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM
+               that platform's image URI; overrides everything below, for a
+               build whose CUDA and ROCm images are unrelated artifacts
+  VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
+  BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
 
-BENCH_ONLY is propagated to each step; when truthy, steps run vllm bench
-configs and skip lm_eval tasks. Workloads can also set ``bench_only: true`` to
-apply it to that step without forcing the whole build to skip lm_eval.
+Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
+without forcing the whole build to skip lm_eval.
 
 Writes pipeline YAML to stdout for ``buildkite-agent pipeline upload``.
 """
 
 import glob
 import os
+import re
 import sys
 
 import yaml
-
-LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib")
-sys.path.insert(0, LIB_DIR)
-
-import images  # noqa: E402  (needs LIB_DIR on sys.path)
-import registry  # noqa: E402
-
 
 def setup_command(packages):
     return (
@@ -59,7 +54,8 @@ RUN_TEMPLATE = (
 )
 
 DEFAULT_TIMEOUT = 120
-PROFILES_PATH = os.path.join(LIB_DIR, "gpu_profiles.yaml")
+PROFILES_PATH = os.path.join(os.path.dirname(__file__), "..", "lib", "gpu_profiles.yaml")
+DEFAULT_IMAGE_REPO = "vllm/vllm-openai"
 
 GPU_EMOJI = {
     "H200": ":h200:",
@@ -84,6 +80,45 @@ def ecr_pull_through(image):
 
 def is_truthy(value):
     return str(value or "").lower() in {"1", "true", "yes"}
+
+
+def commit_from_image(image):
+    """Extract a commit SHA from an image tag, if one is embedded."""
+    _, sep, tag = image.rpartition(":")
+    if not sep:
+        return ""
+    tag = tag.split("@", 1)[0]
+    m = (re.match(r"nightly-([0-9a-f]{7,40})(?:[-_.].*)?$", tag, re.IGNORECASE)
+         or re.search(r"(?:^|[-_.])([0-9a-f]{12,40})(?:$|[-_.])", tag, re.IGNORECASE))
+    return m.group(1) if m else ""
+
+
+def platform_image(repo):
+    """VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM — this platform's image, if pinned.
+
+    For a build whose platforms are separate artifacts with unrelated tags,
+    which nothing else here can name.
+    """
+    platform = "ROCM" if "rocm" in repo.lower() else "CUDA"
+    return (os.environ.get(f"VLLM_IMAGE_{platform}") or "").strip()
+
+
+def resolved_image(data, profile):
+    vllm = data.get("vllm") or {}
+    override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
+    override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
+    custom_repo = (profile.get("image_repo") or "").strip()
+    repo = custom_repo or DEFAULT_IMAGE_REPO
+    pinned = platform_image(repo)
+    if pinned:
+        return pinned
+    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
+    if override_image and (not custom_repo or "rocm" in override_image.lower()):
+        return override_image
+    commit = override_commit or commit_from_image(override_image)
+    if commit:
+        return f"{repo}:nightly-{commit}"
+    return vllm.get("image", f"{repo}:nightly")
 
 
 def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
@@ -241,12 +276,6 @@ def make_step(path, data, profiles):
     profile = profiles.get(gpu)
     if not profile:
         sys.exit(f"{path}: unknown gpu {gpu!r} (expected one of {', '.join(profiles)})")
-    try:
-        resolved = images.resolve(
-            data.get("vllm") or {}, profile, verify=registry.image_exists
-        )
-    except ValueError as e:
-        sys.exit(f"{path}: {e}")
     queue = queue_for_gpu(gpu, profile)
     timeout = data.get("timeout_in_minutes", DEFAULT_TIMEOUT)
     emoji = GPU_EMOJI.get(gpu, ":buildkite:")
@@ -267,9 +296,7 @@ def make_step(path, data, profiles):
         "commands": setup_commands + [RUN_TEMPLATE.format(path=path)],
         "artifact_paths": ["results/**/*"],
     }
-    if resolved.unavailable:
-        step["skip"] = resolved.unavailable
-    elif profile.get("server_runtime") == "native":
+    if profile.get("server_runtime") == "native":
         kind = profile.get("k8s_plugin")
         if not kind:
             sys.exit(
@@ -279,14 +306,15 @@ def make_step(path, data, profiles):
         builder = K8S_PLUGINS.get(kind)
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
-        image = ecr_pull_through(resolved.image)
+        image = ecr_pull_through(resolved_image(data, profile))
         step["plugins"] = [builder(image, data.get("num_gpus", 1), profile, gpu)]
-    # Pin the step to the image resolved here, so the job doesn't have to repeat
-    # (and can't disagree with) the platform routing.
-    step_env = {}
-    if resolved.image:
-        step_env[f"VLLM_IMAGE_{resolved.platform.upper()}"] = resolved.image
-    if bench_only:
+    step_env = {
+        k: os.environ[k]
+        for k in ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM",
+                  "VLLM_COMMIT", "BENCH_ONLY")
+        if os.environ.get(k)
+    }
+    if bench_only and "BENCH_ONLY" not in step_env:
         step_env["BENCH_ONLY"] = "1"
     if step_env:
         step["env"] = step_env
@@ -315,14 +343,6 @@ def select_workloads(workloads):
     return [w for w in workloads if w["data"].get("nightly") is True]
 
 
-def describe(step):
-    """One-line 'what will this step run' summary for the bootstrap log."""
-    if step.get("skip"):
-        return f"SKIPPED: {step['skip']}"
-    env = step.get("env") or {}
-    return next((v for k, v in env.items() if k.startswith("VLLM_IMAGE_")), "?")
-
-
 def main():
     profiles = load_profiles()
     workloads = load_workloads()
@@ -335,8 +355,6 @@ def main():
             " has `nightly: true`"
         )
     steps = [make_step(w["path"], w["data"], profiles) for w in selected]
-    for step in steps:
-        print(f"{step['label']}: {describe(step)}", file=sys.stderr)
     print(yaml.dump({"steps": steps}, default_flow_style=False, sort_keys=False))
 
 

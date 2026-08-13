@@ -34,6 +34,10 @@ BK_ENV_VARS = (
     "BUILDKITE_PIPELINE_SLUG",
 )
 # Top-level fields the dashboard reads to show "image" and the vLLM commit.
+# WORKLOAD_IMAGE is the resolved docker URI (set by parse_workload.py via the
+# VLLM_IMAGE / VLLM_COMMIT override env vars or the workload yaml's vllm.image).
+# WORKLOAD_VLLM_COMMIT is the commit used by that resolved image, when it can
+# be determined from VLLM_COMMIT or a commit-bearing image tag.
 VLLM_ENV_VARS = (
     ("WORKLOAD_IMAGE", "image"),
     ("WORKLOAD_VLLM_COMMIT", "vllm_commit"),

@@ -3,13 +3,12 @@
 
 Run with ``python3 .buildkite/test_generate_pipeline.py`` (needs only pyyaml,
 which the pipeline already installs). No pytest / GPU / network required.
-Image resolution itself is covered by ``python3 lib/test_images.py``.
 
-Guards two things. The HF-cache volume behaviour: the AMD k8s plugin must NOT
-emit a root-disk hostPath by default (that leaked model caches onto node root
-disks), and the volume source must be overridable per-cluster. And how a step
-carries its image: every step is pinned to the image its platform resolved to,
-and a platform with no image in this build produces a skipped step.
+Guards the HF-cache volume behaviour: the AMD k8s plugin must NOT emit a
+root-disk hostPath by default (that leaked model caches onto node root disks),
+and the volume source must be overridable per-cluster. Also guards the
+per-platform image pins, which have to reach the platform they name and only
+that one.
 """
 
 import contextlib
@@ -24,11 +23,16 @@ spec = importlib.util.spec_from_file_location(
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
+
 IMAGE_VARS = ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM", "VLLM_COMMIT")
+
+CUDA = {"queue": "H200"}
+ROCM = {"queue": "mi355_perf_eval", "image_repo": "vllm/vllm-openai-rocm"}
 
 
 @contextlib.contextmanager
 def build_env(**pins):
+    """Run a test with exactly `pins` set, so the host env can't leak in."""
     saved = {k: os.environ.pop(k, None) for k in IMAGE_VARS}
     os.environ.update(pins)
     try:
@@ -37,12 +41,6 @@ def build_env(**pins):
         for k in IMAGE_VARS:
             os.environ.pop(k, None)
         os.environ.update({k: v for k, v in saved.items() if v is not None})
-
-
-def _step(gpu, **extra):
-    data = {"name": f"test-{gpu.lower()}", "gpu": gpu, "num_gpus": 8,
-            "vllm": {"model": "test/model"}, "vllm_bench": {"configs": []}, **extra}
-    return g.make_step(f"workloads/test_{gpu.lower()}.yaml", data, g.load_profiles())
 
 
 def _amd_volumes(profile, gpu="MI300X"):
@@ -124,32 +122,46 @@ def test_shipped_amd_profiles_have_no_rootdisk_hostpath():
         )
 
 
-def test_step_is_pinned_to_its_platform_image():
-    """A ROCm step runs the ROCm pin — in its pod spec and in the env the job
-    re-reads — even when the CUDA pin's name looks nothing like it."""
+def test_platform_pins_reach_their_own_platform():
+    """The release-candidate case: two images that share nothing in their names,
+    each reaching only the workloads of its platform."""
     with build_env(
         VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2",
         VLLM_IMAGE_ROCM="other.registry/amd-vllm:rc2-final",
         VLLM_COMMIT="abc1234def5678",
     ):
-        amd, nvidia = _step("MI355X"), _step("H200")
-    pod_image = amd["plugins"][0]["kubernetes"]["podSpecPatch"]["containers"][0]["image"]
-    assert pod_image == "other.registry/amd-vllm:rc2-final", pod_image
-    assert amd["env"]["VLLM_IMAGE_ROCM"] == "other.registry/amd-vllm:rc2-final"
-    assert nvidia["env"]["VLLM_IMAGE_CUDA"] == "myrepo/vllm:v0.12.0rc2"
-    assert "VLLM_IMAGE_ROCM" not in nvidia["env"]
+        assert g.resolved_image({}, CUDA) == "myrepo/vllm:v0.12.0rc2"
+        assert g.resolved_image({}, ROCM) == "other.registry/amd-vllm:rc2-final"
 
 
-def test_step_is_skipped_when_its_platform_has_no_image():
-    """A CUDA-only release candidate leaves AMD workloads visible-but-skipped
-    rather than running them against an unrelated image."""
-    with build_env(VLLM_IMAGE="myrepo/vllm:v0.12.0rc2", VLLM_COMMIT="abc1234def5678"):
-        amd = _step("MI355X")
-    assert amd["skip"], amd
-    assert "VLLM_IMAGE_ROCM" in amd["skip"]
-    assert len(amd["skip"]) <= 70, "Buildkite caps skip reasons at 70 chars"
-    assert "plugins" not in amd, "a skipped step must not name an image to pull"
-    assert "VLLM_IMAGE_ROCM" not in (amd.get("env") or {})
+def test_platform_pin_wins_over_other_selection():
+    """A platform pin overrides VLLM_IMAGE, VLLM_COMMIT and the workload's own
+    image — it is the one thing that knows what that platform should run."""
+    with build_env(
+        VLLM_IMAGE="vllm/vllm-openai:nightly-abc1234",
+        VLLM_IMAGE_ROCM="myrepo/rocm:pin",
+        VLLM_COMMIT="abc1234",
+    ):
+        data = {"vllm": {"image": "vllm/vllm-openai-rocm:some-pin"}}
+        assert g.resolved_image(data, ROCM) == "myrepo/rocm:pin"
+
+
+def test_one_platform_pin_leaves_the_other_alone():
+    """Pinning ROCm must not change what CUDA workloads resolve to."""
+    with build_env(
+        VLLM_IMAGE_ROCM="myrepo/rocm:pin", VLLM_COMMIT="abc1234def5678"
+    ):
+        assert g.resolved_image({}, CUDA) == "vllm/vllm-openai:nightly-abc1234def5678"
+
+
+def test_platform_pins_are_passed_to_the_step():
+    """The job re-resolves the image, so it needs to see the pins the generator
+    saw."""
+    with build_env(VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2"):
+        step = g.make_step(
+            "workloads/test.yaml", {"name": "t", "gpu": "H200"}, g.load_profiles()
+        )
+    assert step["env"]["VLLM_IMAGE_CUDA"] == "myrepo/vllm:v0.12.0rc2"
 
 
 def main():
