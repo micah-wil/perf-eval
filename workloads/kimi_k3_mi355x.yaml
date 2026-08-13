@@ -11,6 +11,7 @@ vllm:
     AITER_SITUV2_A8W4: 1
     AITER_BF16_FP8_MOE_BOUND: 0
     VLLM_USE_BREAKABLE_CUDAGRAPH: 0
+    OMP_NUM_THREADS: 1
   serve_args: >-
     --trust-remote-code
     --tensor-parallel-size 8
