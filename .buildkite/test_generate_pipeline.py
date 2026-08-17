@@ -194,6 +194,13 @@ def test_platform_pins_are_passed_to_the_step():
     assert step["env"]["VLLM_IMAGE_CUDA"] == "myrepo/vllm:v0.12.0rc2"
 
 
+def test_run_command_fetches_ingest_token_before_workload():
+    command = g.RUN_TEMPLATE.format(path="workloads/example.yaml")
+    get_secret = "buildkite-agent secret get INGEST_BEARER_TOKEN"
+    assert get_secret in command
+    assert command.index(get_secret) < command.index("./lib/run.sh")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
