@@ -554,6 +554,19 @@ def _split_metric_key(key):
     return (name + sep + filt), is_stderr
 
 
+def json_for_sql(obj):
+    """Serialize for a MySQL JSON column, dropping anything it would reject.
+
+    Model output reaches us verbatim, and lm_eval samples sometimes carry lone
+    surrogates (an unpaired \\ud800-\\udfff). Python serializes those happily,
+    but MySQL rejects the result with `3140 Invalid JSON text: "Invalid encoding
+    in string."` and the whole batch fails. Round-tripping through UTF-8 with
+    `replace` substitutes them so one bad character cannot cost a file.
+    """
+    text = json.dumps(obj, ensure_ascii=False)
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def env_vars_json():
     """WORKLOAD_ENV (newline-separated KEY=VALUE) as a JSON object, or None.
 
@@ -636,7 +649,7 @@ def write_results(conn, path, md, data, command_path=None):
         "vllm_commit": md.get("vllm_commit"),
         **_bk_row(md),
         **repro_row("eval_command", command_path),
-        "data": json.dumps(data),
+        "data": json_for_sql(data),
         "dedupe_hash": _hash(
             md.get("buildkite_build_id"), md["workload"], md["task"], str(path)
         ),
@@ -664,7 +677,7 @@ def write_samples(conn, path, md, samples, start_index=0):
             "image": md.get("image"),
             "vllm_commit": md.get("vllm_commit"),
             **bk,
-            "sample": json.dumps(sample),
+            "sample": json_for_sql(sample),
             "dedupe_hash": _hash(
                 md.get("buildkite_build_id"), md["workload"], md["task"],
                 str(path), index,
@@ -697,7 +710,7 @@ def write_perf(conn, data, workload=None, bench_name=None, command_path=None):
     md = {f: (os.environ.get(f.upper()) or "").strip() or None for f in BK_FIELDS}
     md["nightly"] = data.get("nightly") or os.environ.get("NIGHTLY") == "1"
     row.update(_bk_row(md))
-    row["extra"] = json.dumps(extra) if extra else None
+    row["extra"] = json_for_sql(extra) if extra else None
     # A build re-running the same bench config should update its row, not add
     # a second one; without a build id, fall back to the run timestamp.
     row["dedupe_hash"] = _hash(
