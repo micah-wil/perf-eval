@@ -375,6 +375,32 @@ def select_workloads(workloads):
     return [w for w in workloads if w["data"].get("nightly") is True]
 
 
+def images_by_platform(selected, profiles):
+    """The image each platform resolved to, and how many workloads it covers.
+
+    Keyed by (platform, image), where an empty image means the platform is being
+    skipped. Only valid once make_step has vetted the gpu of every workload.
+    """
+    counts = {}
+    for w in selected:
+        profile = profiles[w["data"]["gpu"]]
+        key = (platform_of(profile), resolved_image(w["data"], profile))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def report_images(selected, profiles):
+    """Log the image per platform, the one thing a build's whole meaning rests on.
+
+    Goes to stderr because stdout is the pipeline YAML. Without this the image is
+    only visible inside each job, after the GPUs are already booked.
+    """
+    for (platform, image), n in sorted(images_by_platform(selected, profiles).items()):
+        what = image or f"skipped, set VLLM_IMAGE_{platform}"
+        print(f"{platform}: {what} ({n} workload{'s' if n != 1 else ''})",
+              file=sys.stderr)
+
+
 def main():
     profiles = load_profiles()
     workloads = load_workloads()
@@ -387,6 +413,7 @@ def main():
             " has `nightly: true`"
         )
     steps = [make_step(w["path"], w["data"], profiles) for w in selected]
+    report_images(selected, profiles)
     print(yaml.dump({"steps": steps}, default_flow_style=False, sort_keys=False))
 
 

@@ -194,6 +194,20 @@ def test_platform_pins_are_passed_to_the_step():
     assert step["env"]["VLLM_IMAGE_CUDA"] == "myrepo/vllm:v0.12.0rc2"
 
 
+def test_summary_names_the_image_of_every_platform():
+    """The generate-steps log has to name both platforms, including the one that
+    resolved to nothing — that is the case someone needs to notice."""
+    profiles = {"H200": CUDA, "MI355X": ROCM}
+    selected = [
+        {"path": "workloads/a.yaml", "data": {"name": "a", "gpu": "H200"}},
+        {"path": "workloads/b.yaml", "data": {"name": "b", "gpu": "MI355X"}},
+        {"path": "workloads/c.yaml", "data": {"name": "c", "gpu": "MI355X"}},
+    ]
+    with build_env(VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2"):
+        counts = g.images_by_platform(selected, profiles)
+    assert counts == {("CUDA", "myrepo/vllm:v0.12.0rc2"): 1, ("ROCM", ""): 2}
+
+
 def test_run_command_fetches_ingest_token_before_workload():
     command = g.RUN_TEMPLATE.format(path="workloads/example.yaml")
     get_secret = "buildkite-agent secret get INGEST_BEARER_TOKEN"
