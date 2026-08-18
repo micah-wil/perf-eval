@@ -376,11 +376,7 @@ def select_workloads(workloads):
 
 
 def images_by_platform(selected, profiles):
-    """The image each platform resolved to, and how many workloads it covers.
-
-    Keyed by (platform, image), where an empty image means the platform is being
-    skipped. Only valid once make_step has vetted the gpu of every workload.
-    """
+   # The image each platform resolved to, and how many workloads it covers.
     counts = {}
     for w in selected:
         profile = profiles[w["data"]["gpu"]]
@@ -390,11 +386,7 @@ def images_by_platform(selected, profiles):
 
 
 def report_images(selected, profiles):
-    """Log the image per platform, the one thing a build's whole meaning rests on.
-
-    Goes to stderr because stdout is the pipeline YAML. Without this the image is
-    only visible inside each job, after the GPUs are already booked.
-    """
+    # Log the image per platform
     for (platform, image), n in sorted(images_by_platform(selected, profiles).items()):
         what = image or f"skipped, set VLLM_IMAGE_{platform}"
         print(f"{platform}: {what} ({n} workload{'s' if n != 1 else ''})",
