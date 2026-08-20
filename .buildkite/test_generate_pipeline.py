@@ -208,6 +208,49 @@ def test_summary_names_the_image_of_every_platform():
     assert counts == {("CUDA", "myrepo/vllm:v0.12.0rc2"): 1, ("ROCM", ""): 2}
 
 
+def _pod_image(step):
+    """The image the k8s plugin tells the pod to pull, either podSpec shape."""
+    k8s = step["plugins"][0]["kubernetes"]
+    spec = k8s.get("podSpec") or k8s["podSpecPatch"]
+    return spec["containers"][0]["image"]
+
+
+def test_amd_pod_pulls_public_ecr_directly():
+    """AMD clusters hold no credentials for the pull-through cache, so their
+    image must reach the pod as the public ECR ref, unrewritten."""
+    ecr = "public.ecr.aws/q9t5s3a7/vllm-release-repo:abc1234def5678-rocm"
+    with build_env(VLLM_IMAGE_ROCM=ecr):
+        step = g.make_step(
+            "workloads/test.yaml", {"name": "t", "gpu": "MI355X"}, g.load_profiles()
+        )
+    assert _pod_image(step) == ecr
+
+
+def test_nvidia_pod_pulls_through_the_cache():
+    """NVIDIA clusters renew credentials for the cache, and still use it."""
+    ecr = "public.ecr.aws/q9t5s3a7/vllm-release-repo:abc1234def5678-x86_64"
+    with build_env(VLLM_IMAGE_CUDA=ecr):
+        step = g.make_step(
+            "workloads/test.yaml", {"name": "t", "gpu": "B200"}, g.load_profiles()
+        )
+    assert _pod_image(step) == (
+        g.ECR_PULL_THROUGH_CACHE + "q9t5s3a7/vllm-release-repo:abc1234def5678-x86_64"
+    )
+
+
+def test_non_ecr_images_are_never_rewritten():
+    """A Docker Hub ref has no cache equivalent; both platforms take it as-is."""
+    with build_env(
+        VLLM_IMAGE_CUDA="vllm/vllm-openai:nightly-abc1234def5678",
+        VLLM_IMAGE_ROCM="vllm/vllm-openai-rocm:nightly-abc1234def5678",
+    ):
+        profiles = g.load_profiles()
+        b200 = g.make_step("workloads/t.yaml", {"name": "t", "gpu": "B200"}, profiles)
+        mi355x = g.make_step("workloads/t.yaml", {"name": "t", "gpu": "MI355X"}, profiles)
+    assert _pod_image(b200) == "vllm/vllm-openai:nightly-abc1234def5678"
+    assert _pod_image(mi355x) == "vllm/vllm-openai-rocm:nightly-abc1234def5678"
+
+
 def test_run_command_fetches_ingest_token_before_workload():
     command = g.RUN_TEMPLATE.format(path="workloads/example.yaml")
     get_secret = "buildkite-agent secret get INGEST_BEARER_TOKEN"

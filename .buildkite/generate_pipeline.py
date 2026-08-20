@@ -82,6 +82,16 @@ def ecr_pull_through(image):
     return image
 
 
+def k8s_image(image, k8s_plugin_kind):
+    """The image as a native k8s step must name it.
+
+    Only the NVIDIA clusters can reach the pull-through cache
+    """
+    if k8s_plugin_kind == "nvidia":
+        return ecr_pull_through(image)
+    return image
+
+
 def is_truthy(value):
     return str(value or "").lower() in {"1", "true", "yes"}
 
@@ -338,7 +348,7 @@ def make_step(path, data, profiles):
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
         step["plugins"] = [
-            builder(ecr_pull_through(image), data.get("num_gpus", 1), profile, gpu)
+            builder(k8s_image(image, kind), data.get("num_gpus", 1), profile, gpu)
         ]
     step_env = {
         k: os.environ[k]
