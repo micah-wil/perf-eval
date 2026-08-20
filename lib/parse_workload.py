@@ -12,6 +12,8 @@ Image precedence: VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
 are not validated against the registry (because they will not run).
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import os
@@ -24,7 +26,7 @@ import yaml
 TASK_FIELDS = {"name", "num_fewshot", "model_args"}
 BENCH_FIELDS = {
     "name", "backend", "dataset", "input_len", "output_len",
-    "num_prompts", "max_concurrency", "args",
+    "num_prompts", "max_concurrency", "repetitions", "args",
     "speed_bench_dataset_subset", "speed_bench_category",
 }
 BENCH_REQUIRED = ("name", "input_len", "output_len", "num_prompts", "max_concurrency")
@@ -231,6 +233,53 @@ def encode_bench_args(args: object, config_name: str, path: str) -> str:
     return encode_arg_map(args, config_name, path, BENCH_RESERVED_ARGS, "vllm_bench")
 
 
+def expand_bench_config(c: dict, path: str) -> list:
+    """Expand a bench config's concurrency sweep into concrete runs.
+
+    max_concurrency may be a single int or a list of
+    them (one run per value). Either way each run's name is suffixed with
+    `-conc-<value>`, so the config name is the shape description without the
+    concurrency. `num_prompts` is either a single value applied to every run,
+    or — only when `max_concurrency` is a list — a list of the same length
+    giving a per-concurrency request count. Returns a list of
+    (name, num_prompts, max_concurrency) tuples.
+    """
+    name = c["name"]
+    mc = c["max_concurrency"]
+    npr = c["num_prompts"]
+    is_sweep = isinstance(mc, list)
+
+    concs = mc if is_sweep else [mc]
+    if is_sweep and not concs:
+        sys.exit(f"{path}: vllm_bench config {name!r} has an empty max_concurrency list")
+
+    if isinstance(npr, list):
+        if not is_sweep:
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts may only be a list when "
+                f"max_concurrency is a list"
+            )
+        if len(npr) != len(concs):
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts list has {len(npr)} entries "
+                f"but max_concurrency has {len(concs)}"
+            )
+        nprompts = npr
+    else:
+        nprompts = [npr] * len(concs)
+    for v in nprompts:
+        if not (isinstance(v, int) and v > 0):
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts must be a positive integer "
+                f"(or a list of them matching max_concurrency)"
+            )
+
+    return [
+        (f"{name}-conc-{conc}", n, conc)
+        for conc, n in zip(concs, nprompts)
+    ]
+
+
 def bench_tsv(configs: list, path: str) -> str:
     seen = set()
     lines = []
@@ -244,30 +293,45 @@ def bench_tsv(configs: list, path: str) -> str:
         for k in BENCH_REQUIRED:
             if c.get(k) is None:
                 sys.exit(f"{path}: vllm_bench config {c.get('name')!r} missing required field {k!r}")
-        if c["name"] in seen:
-            sys.exit(f"{path}: duplicate vllm_bench config name {c['name']!r}")
-        seen.add(c["name"])
+
+        repetitions = c.get("repetitions", 1)
+        if (
+            isinstance(repetitions, bool)
+            or not isinstance(repetitions, int)
+            or repetitions < 1
+            or repetitions % 2 == 0
+        ):
+            sys.exit(
+                f"{path}: vllm_bench config {c['name']!r} repetitions must be "
+                "a positive odd integer"
+            )
 
         def opt(key):
-            v = c.get(key)
+            v = c.get(key)  # noqa: B023
             return str(v) if v not in (None, "") else "-"
 
-        lines.append(
-            "\t".join(
-                [
-                    c["name"],
-                    opt("backend"),
-                    str(c.get("dataset", "random")),
-                    str(c["input_len"]),
-                    str(c["output_len"]),
-                    str(c["num_prompts"]),
-                    str(c["max_concurrency"]),
-                    opt("speed_bench_dataset_subset"),
-                    opt("speed_bench_category"),
-                    encode_bench_args(c.get("args"), c["name"], path),
-                ]
+        encoded_args = encode_bench_args(c.get("args"), c["name"], path)
+        for run_name, nprompts, conc in expand_bench_config(c, path):
+            if run_name in seen:
+                sys.exit(f"{path}: duplicate vllm_bench config name {run_name!r}")
+            seen.add(run_name)
+            lines.append(
+                "\t".join(
+                    [
+                        run_name,
+                        opt("backend"),
+                        str(c.get("dataset", "random")),
+                        str(c["input_len"]),
+                        str(c["output_len"]),
+                        str(nprompts),
+                        str(conc),
+                        str(repetitions),
+                        opt("speed_bench_dataset_subset"),
+                        opt("speed_bench_category"),
+                        encoded_args,
+                    ]
+                )
             )
-        )
     return "\n".join(lines)
 
 

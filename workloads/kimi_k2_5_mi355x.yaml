@@ -8,6 +8,7 @@ vllm:
   model: moonshotai/Kimi-K2.5
   env:
     VLLM_ROCM_USE_AITER: 1
+    # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
     OMP_NUM_THREADS: 1
   serve_args: >-
     --tensor-parallel-size 8
@@ -28,7 +29,7 @@ lm_eval:
 
 vllm_bench:
   configs:
-    - name: 8k-in-1k-out-conc-128
+    - name: 8k-in-1k-out
       backend: openai
       dataset: random
       input_len: 8192

@@ -1,19 +1,18 @@
-# Qwen3.5 h200
-name: qwen3_5-h200
-gpu: H200
+# GLM-5.2 (FP8) on AMD MI355X
+name: glm_5_2-mi355x
+gpu: MI355X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: Qwen/Qwen3.5-397B-A17B-FP8
+  model: zai-org/GLM-5.2-FP8
+  env:
+    VLLM_ROCM_USE_AITER: 1
+    # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
+    OMP_NUM_THREADS: 1
   serve_args: >-
     --tensor-parallel-size 8
-    --enable-expert-parallel
-    --reasoning-parser qwen3
-    --language-model-only
     --trust-remote-code
-    --max-num-seqs 256
-    --max-model-len auto
 
 lm_eval:
   model_args:
@@ -26,6 +25,7 @@ lm_eval:
       model_args:
         num_concurrent: 64
         max_length: 40960
+        max_gen_toks: 32768
 
 vllm_bench:
   configs:
@@ -34,8 +34,7 @@ vllm_bench:
       dataset: random
       input_len: 8192
       output_len: 1024
-      num_prompts: 256
+      num_prompts: 512
       max_concurrency: 128
-      repetitions: 3
-      args:
-        num_warmups: 128
+      speed_bench_dataset_subset: throughput_8k
+      speed_bench_category: low_entropy
