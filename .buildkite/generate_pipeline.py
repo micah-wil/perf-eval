@@ -111,11 +111,6 @@ def platform_of(profile):
 
 
 def platform_image(profile):
-    """VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM — this platform's image, if pinned.
-
-    For a build whose platforms are separate artifacts with unrelated tags,
-    which nothing else here can name.
-    """
     return (os.environ.get(f"VLLM_IMAGE_{platform_of(profile)}") or "").strip()
 
 
