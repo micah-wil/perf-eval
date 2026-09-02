@@ -7,9 +7,12 @@ projects it into shell variables: top-level metadata, server config
 (image, model, serve_args, env, runtime), the lm_eval task list, the
 vllm_bench config list, and bench ingest metadata (device/tp/precision).
 
-Image precedence: VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
-`vllm/vllm-openai:latest`. When BENCH_ONLY is truthy, lm_eval task names
-are not validated against the registry (because they will not run).
+Image precedence: VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM (whichever matches the
+workload's GPU) > VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
+`vllm/vllm-openai:latest`. A build that pins images per platform but not this
+workload's, and sets no VLLM_IMAGE, has nothing to run here and is an error.
+When BENCH_ONLY is truthy, lm_eval task names are not validated against the
+registry (because they will not run).
 """
 
 from __future__ import annotations
@@ -104,13 +107,39 @@ def load_profile(gpu: str, workload_path: str) -> dict:
     return profiles[gpu]
 
 
+def platform_of(profile: dict) -> str:
+    """The platform a profile runs, from the repo its images come from."""
+    repo = (profile.get("image_repo") or "").strip() or "vllm/vllm-openai"
+    return "ROCM" if "rocm" in repo.lower() else "CUDA"
+
+
+def platform_image(profile: dict) -> str:
+    """VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM — this platform's image, if pinned.
+
+    For a build whose platforms are separate artifacts with unrelated tags,
+    which nothing else here can name.
+    """
+    return (os.environ.get(f"VLLM_IMAGE_{platform_of(profile)}") or "").strip()
+
+
+def pins_only_other_platforms(profile: dict) -> bool:
+    """True when the build pins per-platform images, but not this platform's."""
+    mine = f"VLLM_IMAGE_{platform_of(profile)}"
+    return any(
+        (os.environ.get(k) or "").strip()
+        for k in ("VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM")
+        if k != mine
+    )
+
+
 def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
     """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload.
 
     A workload that sets ``pin_image: true`` keeps its own ``vllm.image`` even
-    when VLLM_IMAGE / VLLM_COMMIT are set. Use it for models that only exist in
-    a dedicated image (e.g. kimi-k3, minimax-m3) where the nightly override
-    would pull an image that cannot serve the model.
+    when VLLM_IMAGE / VLLM_COMMIT or a platform pin are set. Use it for models
+    that only exist in a dedicated image (e.g. kimi-k3, minimax-m3) where the
+    nightly override would pull an image that cannot serve the model. Failing
+    that, VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM decide their own platform.
     """
     override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
@@ -118,10 +147,17 @@ def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
     # images (CUDA) are stored at vllm/vllm-openai
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or "vllm/vllm-openai"
-    pinned = vllm.get("pin_image") is True and vllm.get("image")
-    if pinned:
+    if vllm.get("pin_image") is True and vllm.get("image"):
         image = vllm["image"]
         return image, commit_from_image(str(image))
+    platform_pin = platform_image(profile)
+    if platform_pin:
+        return platform_pin, override_commit or commit_from_image(platform_pin)
+    # This build pins images per platform and didn't pin ours. The generator
+    # skips these workloads, so only a direct run.sh gets here.
+    if pins_only_other_platforms(profile) and not override_image:
+        platform = platform_of(profile)
+        sys.exit(f"no {platform} image: set VLLM_IMAGE_{platform} or VLLM_IMAGE")
 
     # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image.
     # A CUDA release image may embed a commit in its tag, but that must not
