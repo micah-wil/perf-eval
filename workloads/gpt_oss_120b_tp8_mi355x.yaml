@@ -26,3 +26,46 @@ lm_eval:
       model_args:
         num_concurrent: 64
         max_gen_toks: 2048
+
+vllm_bench:
+  configs:
+    - name: 1k-in-1k-out-conc-1
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 10
+      max_concurrency: 1
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-8
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 80
+      max_concurrency: 8
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-64
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 640
+      max_concurrency: 64
+      args:
+        num_warmups: 1
+        temperature: 0
+    - name: 1k-in-1k-out-conc-128
+      backend: openai
+      dataset: random
+      input_len: 1024
+      output_len: 1024
+      num_prompts: 1280
+      max_concurrency: 128
+      args:
+        num_warmups: 1
+        temperature: 0
