@@ -3,11 +3,13 @@ name: deepseek-r1-0528-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
+timeout_in_minutes: 240
 
 vllm:
   model: deepseek-ai/DeepSeek-R1-0528
   env:
     VLLM_ROCM_USE_AITER: 1
+    VLLM_ENGINE_READY_TIMEOUT_S: "5400"
   serve_args: >-
     --tensor-parallel-size 8
     --max-model-len 32768
