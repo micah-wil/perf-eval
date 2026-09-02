@@ -251,11 +251,60 @@ def test_non_ecr_images_are_never_rewritten():
     assert _pod_image(mi355x) == "vllm/vllm-openai-rocm:nightly-abc1234def5678"
 
 
+def test_pin_image_outranks_a_platform_pin():
+    """`pin_image` means the model runs nowhere else, so it beats a platform pin
+    and keeps its workload out of the skip path the pins would otherwise trigger.
+    """
+    data = {"name": "t", "gpu": "MI355X",
+            "vllm": {"image": "myrepo/only-here:v1", "pin_image": True}}
+    with build_env(VLLM_IMAGE_ROCM="other.registry/amd-vllm:rc2-final"):
+        assert g.resolved_image(data, ROCM) == "myrepo/only-here:v1"
+    with build_env(VLLM_IMAGE_CUDA="myrepo/vllm:v0.12.0rc2"):
+        step = g.make_step("workloads/t.yaml", data, g.load_profiles())
+    assert "skip" not in step, "a pinned workload needs no image from the build"
+    assert _pod_image(step) == "myrepo/only-here:v1"
+
+
 def test_run_command_fetches_ingest_token_before_workload():
     command = g.RUN_TEMPLATE.format(path="workloads/example.yaml")
     get_secret = "buildkite-agent secret get INGEST_BEARER_TOKEN"
     assert get_secret in command
     assert command.index(get_secret) < command.index("./lib/run.sh")
+
+
+def test_shipped_amd_profiles_pull_public_ecr_directly():
+    image = "public.ecr.aws/example/release:rocm"
+    profiles = g.load_profiles()
+    for gpu in ("MI300X", "MI355X"):
+        assert g.route_ecr_image(image, profiles[gpu]) == image
+
+
+def test_ecr_pull_through_remains_default():
+    image = "public.ecr.aws/example/release:cuda"
+    assert g.route_ecr_image(image, {}) == (
+        f"{g.ECR_PULL_THROUGH_CACHE}example/release:cuda"
+    )
+
+
+def test_cuda_release_image_does_not_select_rocm_commit():
+    image_key = "VLLM_IMAGE"
+    commit_key = "VLLM_COMMIT"
+    previous_image = os.environ.get(image_key)
+    previous_commit = os.environ.get(commit_key)
+    os.environ[image_key] = "public.ecr.aws/example/release:abc123def456-x86_64"
+    os.environ.pop(commit_key, None)
+    try:
+        image = g.resolved_image({}, {"image_repo": "vllm/vllm-openai-rocm"})
+    finally:
+        if previous_image is None:
+            os.environ.pop(image_key, None)
+        else:
+            os.environ[image_key] = previous_image
+        if previous_commit is None:
+            os.environ.pop(commit_key, None)
+        else:
+            os.environ[commit_key] = previous_commit
+    assert image == "vllm/vllm-openai-rocm:nightly"
 
 
 def main():

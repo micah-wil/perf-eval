@@ -20,7 +20,7 @@ eval "$WORKLOAD_EXPORTS"
 export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME
 echo "image: $WORKLOAD_IMAGE  commit: ${WORKLOAD_VLLM_COMMIT:-unknown}"
 
-PORT=8000
+PORT="${PERF_EVAL_SERVER_PORT:-$(pick_server_port)}"
 CONTAINER="perf-eval-${WORKLOAD_NAME}-$$"
 RESULTS_DIR="results/${WORKLOAD_NAME}"
 BASE_URL="http://localhost:${PORT}"
@@ -35,7 +35,7 @@ trap 'stop_server "$CONTAINER"' EXIT
 
 start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
-wait_healthy "$PORT"
+wait_healthy "$PORT" "$WORKLOAD_SERVER_STARTUP_TIMEOUT" "$WORKLOAD_MODEL"
 
 # vllm bench serve runs first so we can validate perf flow without waiting
 # on a full lm_eval pass. Each config's raw json lands in

@@ -41,10 +41,13 @@ name: qwen3_5-h200       # used in container name and results/<name>/
 gpu: H200                # picks queue/image/HF cache from lib/gpu_profiles.yaml
 num_gpus: 8
 nightly: true            # include in the nightly schedule (default: false)
+timeout_in_minutes: 180  # Buildkite step timeout (default: 120)
 
 vllm:                    # how the server is brought up
   model: Qwen/Qwen3.5-397B-A17B-FP8
   image: vllm/vllm-openai:nightly      # optional; falls back to VLLM_IMAGE / VLLM_COMMIT / latest
+  startup_timeout_s: 3600               # optional; /health wait (default: 3600)
+  pin_image: true                       # optional; keep `image` even when VLLM_IMAGE / VLLM_COMMIT are set
   env:                                  # optional; merged over the GPU profile's env
     SOME_VAR: value
   serve_args: >-                        # appended to `vllm serve <model>`; word-split
@@ -93,7 +96,9 @@ vllm_bench:              # perf runs (optional) — fed to the perf dashboard
 A few things worth knowing:
 
 - **`gpu`** must match a key in `lib/gpu_profiles.yaml`. The profile sets the Buildkite queue, default image, HF cache path, and baseline env vars.
+- **`vllm.image` is normally just a fallback.** The `VLLM_IMAGE` / `VLLM_COMMIT` build-time env vars override it, which is what you want for nightly perf tracking across a specific vLLM commit. Set **`pin_image: true`** only as a rare escape hatch for a model that genuinely cannot be served by the nightly under test (e.g. support landed in a dedicated image but not yet in nightly) — it makes the workload keep its own `image` regardless of the override. Do not pin models that current nightlies already serve.
 - **`nightly`** controls only the nightly schedule. Recipes with `nightly: false` (or omitted) are still triggerable explicitly via the `WORKLOADS` env var.
+- **`timeout_in_minutes`** overrides the Buildkite step timeout (default: `120`). This is separate from `lm_eval.model_args.timeout`, which controls individual API requests.
 - **`lm_eval.tasks` is a list** because each entry runs as a separate `lm_eval` invocation — `--num_fewshot` is a single global flag, so different shot counts need separate runs. Each task's results land in `results/<name>/<task-name>/`.
 - **`vllm_bench` runs first** if both blocks are present — that way perf-pipeline bugs surface quickly instead of waiting on a full lm-eval pass.
 - **`vllm_bench` uses the `random` dataset with `--ignore-eos`** so every request prefills exactly `input_len` and decodes exactly `output_len` tokens — that's what makes the per-GPU decode throughput meaningful. Pair it with `backend: openai` (the `/v1/completions` endpoint) for exact token control. Avoid `dataset: speed_bench` for throughput numbers: it requires `--skip-tokenizer-init`, which makes `vllm bench serve` cap every request at a single output token, so output throughput reads as ~0.
@@ -144,11 +149,11 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 
 **Optional env vars:**
 
-- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image`.
+- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image`. The one exception is a workload with `pin_image: true`, which by definition cannot run anything but its own image, so it keeps it and is never skipped.
 
   Pin one platform and the other's workloads are **skipped** (`no ROCM image: set VLLM_IMAGE_ROCM`), on the grounds that a build naming its images per platform names every platform it wants run: benchmarking whatever else was lying around and labelling it with this build's commit is worse than not running. Set `VLLM_IMAGE` alongside the pin to cover the rest, or pin both platforms. Skipped steps are hidden in the build view until you toggle *Skipped jobs*.
 
-  To check what a build settled on, read the **generate steps** job log: it names the image each platform resolved to, and the workload count behind it, before any GPU is booked. Each workload's own log then opens with the image and commit that job resolved (AMD and B200 pods pull the ECR mirror of that ref).
+  To check what a build settled on, read the **generate steps** job log: it names the image each platform resolved to, and the workload count behind it, before any GPU is booked. Each workload's own log then opens with the image and commit that job resolved (B200 pods pull the ECR pull-through mirror of that ref; the AMD clusters have no cache credentials and pull public ECR directly).
 
   ```
   CUDA: myrepo/vllm:v0.12.0rc2 (12 workloads)
@@ -156,6 +161,10 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
   ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
+
+GPU profiles can set `ecr_pull_through_cache: false` when their cluster pulls
+public ECR images directly. Profiles use the private ECR pull-through cache by
+default.
 
 Result uploads authenticate with `Authorization: Bearer ...`. Buildkite jobs
 retrieve `INGEST_BEARER_TOKEN` from the CI cluster's secret store immediately

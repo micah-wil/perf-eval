@@ -1,15 +1,13 @@
-# Kimi-K2.5 on AMD MI300X
-name: kimi_k2_5-mi300x
-gpu: MI300X
+# GLM-5.2 (FP8) on AMD MI355X
+name: glm_5_2-mi355x
+gpu: MI355X
 num_gpus: 8
 nightly: true
 
 vllm:
-  model: moonshotai/Kimi-K2.5
-  startup_timeout_s: 7200
+  model: zai-org/GLM-5.2-FP8
   env:
     VLLM_ROCM_USE_AITER: 1
-    VLLM_ENGINE_READY_TIMEOUT_S: 7200
     # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
     OMP_NUM_THREADS: 1
   serve_args: >-

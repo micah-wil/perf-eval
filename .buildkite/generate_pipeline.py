@@ -82,12 +82,9 @@ def ecr_pull_through(image):
     return image
 
 
-def k8s_image(image, k8s_plugin_kind):
-    """The image as a native k8s step must name it.
-
-    Only the NVIDIA clusters can reach the pull-through cache
-    """
-    if k8s_plugin_kind == "nvidia":
+def route_ecr_image(image, profile):
+    """Use the pull-through cache only on clusters configured for it."""
+    if profile.get("ecr_pull_through_cache", True):
         return ecr_pull_through(image)
     return image
 
@@ -139,18 +136,28 @@ def resolved_image(data, profile):
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or DEFAULT_IMAGE_REPO
-    pinned = platform_image(profile)
-    if pinned:
-        return pinned
+    # A workload that sets pin_image: true keeps its own vllm.image even when
+    # VLLM_IMAGE / VLLM_COMMIT or a platform pin are set: the model exists only
+    # in that image, so the build's own image could not serve it at all.
+    if vllm.get("pin_image") is True and vllm.get("image"):
+        return vllm["image"]
+    platform_pin = platform_image(profile)
+    if platform_pin:
+        return platform_pin
     # A build pinning images per platform names every platform it wants run, so
     # with no pin of ours and no VLLM_IMAGE to fall back on there is nothing
     # representative to benchmark: the caller skips this workload.
     if pins_only_other_platforms(profile) and not override_image:
         return ""
-    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
-    if override_image and (not custom_repo or "rocm" in override_image.lower()):
-        return override_image
-    commit = override_commit or commit_from_image(override_image)
+    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image.
+    # A CUDA release image may embed a commit in its tag, but that must not
+    # implicitly select an unrelated ROCm nightly for AMD jobs.
+    if override_image:
+        if not custom_repo or "rocm" in override_image.lower():
+            return override_image
+        if not override_commit:
+            return vllm.get("image", f"{repo}:nightly")
+    commit = override_commit
     if commit:
         return f"{repo}:nightly-{commit}"
     return vllm.get("image", f"{repo}:nightly")
@@ -348,7 +355,9 @@ def make_step(path, data, profiles):
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
         step["plugins"] = [
-            builder(k8s_image(image, kind), data.get("num_gpus", 1), profile, gpu)
+            builder(
+                route_ecr_image(image, profile), data.get("num_gpus", 1), profile, gpu
+            )
         ]
     step_env = {
         k: os.environ[k]
