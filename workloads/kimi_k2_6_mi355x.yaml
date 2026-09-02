@@ -8,6 +8,7 @@ vllm:
   model: moonshotai/Kimi-K2.6
   env:
     VLLM_ROCM_USE_AITER: 1
+    OMP_NUM_THREADS: 1
   serve_args: >-
     --tensor-parallel-size 4
     --trust-remote-code
