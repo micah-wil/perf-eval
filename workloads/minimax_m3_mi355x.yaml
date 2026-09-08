@@ -22,6 +22,7 @@ vllm:
     --tool-call-parser minimax_m3
     --enable-auto-tool-choice
     --reasoning-parser minimax_m3
+    -cc.cudagraph_mode=FULL_DECODE_ONLY
 
 lm_eval:
   model_args:
