@@ -15,6 +15,7 @@ vllm:
     --moe-backend aiter
     --trust-remote-code
     --no-enable-prefix-caching
+    -cc.cudagraph_mode=FULL_DECODE_ONLY
 
 lm_eval:
   model_args:
