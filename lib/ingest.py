@@ -8,11 +8,6 @@ Walks a per-task results dir produced by lm_eval and uploads:
 Each event is wrapped with workload/task/Buildkite metadata so rows in the
 backing table can be filtered by run.
 
-Two destinations are supported, selected by --sink (env: INGEST_SINK):
-  endpoint  POST to the Cloud Run endpoint backing the Databricks table (default)
-  sql       INSERT into the MySQL database described by lib/sql_upload.py
-  both      write to both
-
 Failures are logged but never fatal: ingestion is best-effort and must not
 abort the lm_eval pipeline.
 """
@@ -21,13 +16,9 @@ import argparse
 import json
 import os
 import sys
-import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sql_upload  # noqa: E402  (same-dir helper; path set above)
 
 DEFAULT_ENDPOINT = "https://vllm-eval-data-ingest-224810116257.us-central1.run.app/"
 TIMEOUT = 30
@@ -54,8 +45,6 @@ VLLM_ENV_VARS = (
 # Set NIGHTLY=1 in the build env to mark rows as part of the nightly schedule.
 # The dashboard's /nightly view filters on this to pair adjacent nightlies.
 NIGHTLY_ENV = "NIGHTLY"
-# Destination selection; see the module docstring.
-SINKS = ("endpoint", "sql", "both")
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -86,40 +75,28 @@ def metadata(workload: str, task: str) -> dict:
     return md
 
 
-def ingest_results(path: Path, md: dict, endpoint: str, conn=None,
-                   command_path=None) -> None:
+def ingest_results(path: Path, md: dict, endpoint: str) -> None:
     with path.open() as f:
         data = json.load(f)
-    if endpoint:
-        payload = {"kind": "results", "source_file": str(path), **md, "data": data}
-        post(endpoint, payload)
-    if conn is not None:
-        n = sql_upload.write_results(conn, path, md, data, command_path)
-        print(f"    sql: {path.name} + {n} metric row(s)")
+    payload = {"kind": "results", "source_file": str(path), **md, "data": data}
+    post(endpoint, payload)
 
 
-def ingest_samples(path: Path, md: dict, endpoint: str, conn=None) -> int:
+def ingest_samples(path: Path, md: dict, endpoint: str) -> int:
     sent = 0
     batch: list = []
     batch_bytes = 0
-    batch_start = 0
     overhead = len(
         json.dumps({"kind": "samples", "source_file": str(path), **md, "samples": []})
     )
 
     def flush() -> None:
-        nonlocal batch, batch_bytes, sent, batch_start
+        nonlocal batch, batch_bytes, sent
         if not batch:
             return
-        if endpoint:
-            payload = {
-                "kind": "samples", "source_file": str(path), **md, "samples": batch,
-            }
-            post(endpoint, payload)
-        if conn is not None:
-            sql_upload.write_samples(conn, path, md, batch, start_index=batch_start)
+        payload = {"kind": "samples", "source_file": str(path), **md, "samples": batch}
+        post(endpoint, payload)
         sent += len(batch)
-        batch_start += len(batch)
         batch = []
         batch_bytes = 0
 
@@ -154,29 +131,9 @@ def main() -> int:
         help="Ingestion endpoint (env: INGEST_URL)",
     )
     p.add_argument("--no-samples", action="store_true", help="Skip samples_*.jsonl uploads")
-    p.add_argument(
-        "--sink",
-        choices=SINKS,
-        default=sql_upload.default_sink(),
-        help="Where to write: endpoint, sql, or both (env: INGEST_SINK;"
-             " defaults to sql when TIGER_SQL_DB is configured)",
-    )
-    p.add_argument(
-        "--sqlconn-file",
-        default=None,
-        help="Path to a .sqlconn file for --sink sql (env: SQLCONN_FILE)",
-    )
-    p.add_argument(
-        "--command-file",
-        default=None,
-        help="File holding the lm_eval command line, stored for reproduction",
-    )
     args = p.parse_args()
 
-    # Always state the destination. A run that used the endpoint because no SQL
-    # credential was visible must not look like a run that never tried.
-    print(f"  ingest: workload={args.workload} task={args.task} sink={args.sink}")
-    sql_upload.print_debug_state(args.sqlconn_file)
+    print(f"  ingest: workload={args.workload} task={args.task}")
 
     root = Path(args.results_dir)
     if not root.is_dir():
@@ -185,70 +142,29 @@ def main() -> int:
 
     results_files = sorted(root.glob("**/results_*.json"))
     samples_files = [] if args.no_samples else sorted(root.glob("**/samples_*.jsonl"))
-    print(f"  sql-debug: cwd={Path.cwd()} results_dir={root}")
-    for f in results_files + samples_files:
-        print(f"  sql-debug: found {f} ({f.stat().st_size} bytes)")
     if not results_files and not samples_files:
         print(f"  ingest: no results_*.json or samples_*.jsonl under {root};"
               " nothing to upload", file=sys.stderr)
-    endpoint = args.endpoint if args.sink in ("endpoint", "both") else None
-
-    conn = None
-    if args.sink in ("sql", "both"):
-        try:
-            print("  sql-debug: opening sql connection...")
-            conn, config = sql_upload.open_sink(args.sqlconn_file)
-            print(f"  ingest -> sql {sql_upload.describe(config)}")
-            if config["conn_file"]:
-                print(f"  sql-debug: some settings came from {config['conn_file']}")
-        except sql_upload.SqlSinkError as e:
-            print(f"  ingest: sql sink unavailable: {e}", file=sys.stderr)
-            traceback.print_exc()
-        except Exception as e:
-            print(f"  ingest: sql connect failed: {type(e).__name__}: {e}",
-                  file=sys.stderr)
-            traceback.print_exc()
-    else:
-        print(f"  sql-debug: sink {args.sink!r} does not include sql;"
-              " no connection made")
-    if endpoint:
-        print(f"  ingest -> {endpoint}")
-    if endpoint is None and conn is None:
-        # Every selected destination failed to open. Say so plainly rather than
-        # walking the files and reporting uploads that went nowhere.
-        print(f"  ingest: no destination available for sink {args.sink!r};"
-              f" {len(results_files)} results file(s) not uploaded", file=sys.stderr)
         return 0
+    endpoint = args.endpoint
+    print(f"  ingest -> {endpoint}")
     print(f"  ({len(results_files)} results, {len(samples_files)} sample file(s))")
 
     md = metadata(args.workload, args.task)
 
-    try:
-        for f in results_files:
-            try:
-                ingest_results(f, md, endpoint, conn, args.command_file)
-                print(f"    uploaded {f.relative_to(root)}")
-            except (urllib.error.URLError, RuntimeError, OSError) as e:
-                print(f"    failed {f.relative_to(root)}: {e}", file=sys.stderr)
-            except Exception as e:  # driver-specific write errors
-                print(f"    failed {f.relative_to(root)}: {type(e).__name__}: {e}",
-                      file=sys.stderr)
-                traceback.print_exc()
+    for f in results_files:
+        try:
+            ingest_results(f, md, endpoint)
+            print(f"    uploaded {f.relative_to(root)}")
+        except (urllib.error.URLError, RuntimeError, OSError) as e:
+            print(f"    failed {f.relative_to(root)}: {e}", file=sys.stderr)
 
-        for f in samples_files:
-            try:
-                n = ingest_samples(f, md, endpoint, conn)
-                print(f"    uploaded {f.relative_to(root)} ({n} samples)")
-            except OSError as e:
-                print(f"    failed {f.relative_to(root)}: {e}", file=sys.stderr)
-            except Exception as e:  # driver-specific write errors
-                print(f"    failed {f.relative_to(root)}: {type(e).__name__}: {e}",
-                      file=sys.stderr)
-                traceback.print_exc()
-    finally:
-        if conn is not None:
-            conn.close()
-            print("  sql-debug: sql connection closed")
+    for f in samples_files:
+        try:
+            n = ingest_samples(f, md, endpoint)
+            print(f"    uploaded {f.relative_to(root)} ({n} samples)")
+        except (urllib.error.URLError, RuntimeError, OSError) as e:
+            print(f"    failed {f.relative_to(root)}: {e}", file=sys.stderr)
 
     return 0
 

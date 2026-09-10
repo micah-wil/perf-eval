@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Transform a `vllm bench serve` raw JSON result and upload it to the perf
-dashboard's ingestion destination.
+"""Transform a `vllm bench serve` raw JSON result and POST it to the perf
+dashboard's ingestion endpoint.
 
 The dashboard at perf.vllm.ai reads from the `vllm_perf_data_ingest`
 Databricks table; that table is populated by the Cloud Run endpoint pinged
 here. Schema modeled after vllm-project/perf-dashboard/benchmark/process_result.py.
-
-Two destinations are supported, selected by --sink (env: INGEST_SINK):
-  endpoint  POST to the Cloud Run endpoint (default)
-  sql       INSERT into the MySQL `perf_results` table (see lib/sql_upload.py)
-  both      write to both
 
 Latencies in the raw result are in milliseconds (e.g., `mean_ttft_ms`).
 The dashboard expects seconds, so the transform drops the `_ms` suffix and
@@ -26,17 +21,11 @@ import datetime
 import json
 import os
 import sys
-import traceback
 import urllib.error
 import urllib.request
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sql_upload  # noqa: E402  (same-dir helper; path set above)
 
 DEFAULT_ENDPOINT = "https://vllm-perf-data-ingest-224810116257.us-central1.run.app/"
 TIMEOUT = 30
-SINKS = ("endpoint", "sql", "both")
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -117,30 +106,11 @@ def main() -> int:
         default=os.environ.get("PERF_INGEST_URL", DEFAULT_ENDPOINT),
         help="Ingestion endpoint (env: PERF_INGEST_URL)",
     )
-    p.add_argument("--workload", default=None, help="Workload (recipe) name; stored by the sql sink")
-    p.add_argument("--bench-name", default=None, help="vllm_bench config name; stored by the sql sink")
-    p.add_argument(
-        "--sink",
-        choices=SINKS,
-        default=sql_upload.default_sink(),
-        help="Where to write: endpoint, sql, or both (env: INGEST_SINK;"
-             " defaults to sql when TIGER_SQL_DB is configured)",
-    )
-    p.add_argument(
-        "--sqlconn-file",
-        default=None,
-        help="Path to a .sqlconn file for --sink sql (env: SQLCONN_FILE)",
-    )
-    p.add_argument(
-        "--command-file",
-        default=None,
-        help="File holding the vllm bench serve command line, stored for reproduction",
-    )
+    p.add_argument("--workload", default=None, help="Workload (recipe) name; recorded in the run metadata")
+    p.add_argument("--bench-name", default=None, help="vllm_bench config name; recorded in the run metadata")
     args = p.parse_args()
 
-    print(f"  perf-ingest: workload={args.workload} bench={args.bench_name}"
-          f" sink={args.sink}")
-    sql_upload.print_debug_state(args.sqlconn_file)
+    print(f"  perf-ingest: workload={args.workload} bench={args.bench_name}")
 
     if not os.path.isfile(args.raw_result):
         print(f"  perf-ingest: raw result file not found: {args.raw_result}", file=sys.stderr)
@@ -154,37 +124,12 @@ def main() -> int:
           f"mean_ttft={data.get('mean_ttft', 0):.4f}s  "
           f"mean_tpot={data.get('mean_tpot', 0):.4f}s")
 
-    if args.sink in ("endpoint", "both"):
-        print(f"  perf-ingest -> {args.endpoint}")
-        try:
-            post(args.endpoint, data)
-            print("    posted ok")
-        except (urllib.error.URLError, RuntimeError, OSError) as e:
-            print(f"    failed: {e}", file=sys.stderr)
-
-    if args.sink in ("sql", "both"):
-        conn = None
-        try:
-            print("  sql-debug: opening sql connection...")
-            conn, config = sql_upload.open_sink(args.sqlconn_file)
-            print(f"  perf-ingest -> sql {sql_upload.describe(config)}")
-            if config["conn_file"]:
-                print(f"  sql-debug: some settings came from {config['conn_file']}")
-            sql_upload.write_perf(conn, data, args.workload, args.bench_name,
-                                  args.command_file)
-            print(f"    inserted into {sql_upload.TABLE_PERF_RESULTS}")
-        except sql_upload.SqlSinkError as e:
-            print(f"    sql sink unavailable: {e}", file=sys.stderr)
-            traceback.print_exc()
-        except Exception as e:  # driver-specific connect/write errors
-            print(f"    sql failed: {type(e).__name__}: {e}", file=sys.stderr)
-            traceback.print_exc()
-        finally:
-            if conn is not None:
-                conn.close()
-                print("  sql-debug: sql connection closed")
-    else:
-        print(f"  sql-debug: sink {args.sink!r} does not include sql; nothing written")
+    print(f"  perf-ingest -> {args.endpoint}")
+    try:
+        post(args.endpoint, data)
+        print("    posted ok")
+    except (urllib.error.URLError, RuntimeError, OSError) as e:
+        print(f"    failed: {e}", file=sys.stderr)
     return 0
 
 

@@ -8,9 +8,9 @@ Each recipe is one `(model, hardware, set of tasks)` combination. The Buildkite 
 
 ```
 workloads/        one YAML per (model, hardware) recipe
-lib/              orchestrator (run.sh), helpers, GPU profiles, ingestion sinks, scrapper.py
+lib/              orchestrator (run.sh), helpers, GPU profiles, dashboard ingest,
+                  cron_backfill.py
 .buildkite/       pipeline bootstrap, step generator, and its tests
-.sqlconn          local-only SQL credentials (gitignored; see Ingestion destinations)
 CLAUDE.md         agent conventions and detailed Buildkite workflow
 ```
 
@@ -122,129 +122,90 @@ Do **not** set an `hf_home` under a node path like `/mnt/shared` unless that pat
 
 Run the generator's tests with `python3 .buildkite/test_generate_pipeline.py` (stdlib + pyyaml only; no GPU needed).
 
-### Ingestion destinations
+### Where results go
 
-Results go to one of two destinations:
+Two things happen with every run's output, and they serve different purposes:
 
-| `INGEST_SINK` | Destination |
+**Dashboards (live).** `lib/ingest.py` and `lib/ingest_perf.py` POST to the Cloud Run endpoints backing the vLLM eval and perf dashboards. This is best-effort — a failed upload is logged and never aborts a run.
+
+**Buildkite artifacts (durable).** Every step uploads `results/**/*`. This is the record that outlives the agent, and it is deliberately complete enough to reconstruct a run without any database:
+
+| Artifact | Contents |
 | --- | --- |
-| `endpoint` | POST to the public Cloud Run endpoints backing the Databricks tables — the vLLM eval and perf dashboards |
-| `sql` | INSERT into a MySQL/MariaDB database |
-| `both` | Write to both |
+| `run_metadata.json` | image and **image digest**, vLLM version and commit, serve command, server env vars, device/tp/precision, and the Buildkite build/job identifiers |
+| `bench-<name>.json` | raw `vllm bench serve` output, one per config |
+| `bench-<name>.cmd` | the exact `vllm bench serve` command line, as it ran |
+| `<task>.cmd` | the exact `lm_eval` command line, as it ran |
+| `<task>/**/results_*.json` | lm_eval scores |
+| `<task>/**/samples_*.jsonl` | per-sample records |
 
-**You normally don't set this.** When `INGEST_SINK` is unset the destination is detected: if `TIGER_SQL_DB` is configured — in the environment, in Buildkite Secrets, or in `.sqlconn` — results go to SQL **instead of** the public endpoint. With no SQL settings present the endpoint remains the default, so nothing changes for runs that never configure a database.
+`run_metadata.json` is written by `lib/write_run_metadata.py` once the server reports healthy, which is the earliest point the vLLM version is known. Anything it could not capture is recorded as `null` rather than omitted, so a reader can tell "not captured" from "not applicable". Values whose names look like credentials (`*TOKEN*`, `*SECRET*`, `*PASSWD*`, `*KEY*`) are redacted, since the file is a public artifact.
 
-Set `INGEST_SINK` explicitly to override the detection: `endpoint` to keep publishing to the dashboards even with a database configured, or `both` to write to each.
-
-**SQL tables.** The schema is **owned outside this repo** — nothing here issues DDL, and the ingest scripts only ever `INSERT`/`UPDATE` rows. `lib/sql_upload.py --print-schema` dumps the shape the code expects so a DBA can create or alter the tables by hand. When the SQL sink is selected, `run.sh` runs `--check` before starting the server and reports missing tables or columns up front. The check is **advisory** — it never fails the run, because ingestion is best-effort and an unreachable database must not throw away hours of GPU work. Four tables:
-
-- **`eval_results`** — one row per lm_eval `results_*.json`, with the full JSON in a `data` column.
-- **`eval_metrics`** — `eval_results` flattened to one row per `(subtask, metric)` with `value` and `stderr`, so the dashboard can query scores without parsing JSON.
-- **`eval_samples`** — one row per line of `samples_*.jsonl`.
-- **`perf_results`** — one row per `vllm bench serve` config, with the dashboard's per-GPU throughput and latency columns. Unrecognized fields land in an `extra` JSON column instead of being dropped.
-
-Every table carries the workload, task, image, vLLM commit, `nightly` flag, and Buildkite build columns. `eval_results` and `perf_results` additionally record how to **reproduce** the run:
-
-| Column | Contents |
-| --- | --- |
-| `image_digest` | `repo@sha256:...` for the image actually used — pinned, unlike a moving `:nightly` tag. NULL when it could not be resolved |
-| `vllm_version` | the served build, read from vLLM's `/version` (its `+g<sha>` suffix also backfills `vllm_commit`) |
-| `env_vars` | JSON of the env vLLM was started with (GPU profile baseline merged with the workload's overrides) |
-| `serve_command` | the `vllm serve` / `docker run` line that brought the server up |
-| `bench_command` / `eval_command` | the exact `vllm bench serve` / `lm_eval` line, captured as it ran |
-
-The two command columns come from `.cmd` files the run helpers write next to each result, so they are the real invocation rather than a reconstruction.
-
-### Backfilling a build into SQL
-
-When a run could not upload — database unreachable, credentials missing, or a build that predates the SQL sink — the results are still attached to the build as Buildkite artifacts. `lib/scrapper.py` pulls them back down and ingests them after the fact:
+### Retrieving a build's results
 
 ```bash
-python3 lib/scrapper.py --build 46                    # one build
-python3 lib/scrapper.py --range 30-46 --state /tmp/scrape.json   # many, resumable
-python3 lib/scrapper.py --build 46 --no-samples --dry-run
+bk artifacts download --build 46 --pipeline perf-eval            # whole build
+bk artifacts download --build 46 --pipeline perf-eval --job-uuid <job>
 ```
 
-For each passed job it resolves the workload's settings with **that build's own** `parse_workload.py` (so per-commit workload edits are honoured), downloads the job's artifacts, and hands them to `ingest_perf.py` / `ingest.py` with the build's provenance in the environment. Artifacts are deleted after each job, so disk never holds more than one job's worth, and every write is a `dedupe_hash` upsert, so re-running a build updates its rows instead of duplicating them.
+The download reproduces the `results/<workload>/...` tree, so `run_metadata.json` sits beside the numbers it describes. To re-run exactly what a build ran, take `serve_command` and the `.cmd` files verbatim and pin the image by `image_digest` rather than its tag — a tag like `:nightly` moves, a digest does not.
 
-It needs the [`bk` CLI](https://buildkite.com/docs/platform/cli) on `PATH` (or `--bk`) with `BUILDKITE_API_TOKEN` set, the same SQL settings as any other ingest, and git able to resolve each build's commit. Useful flags:
+### Cron: loading artifacts into SQL
+
+The pipeline itself never writes to a database — the work servers cannot reach
+one. `lib/cron_artifact_to_sql.py` is a **standalone** job that runs elsewhere:
+it pulls each finished build's artifacts from Buildkite and loads them into the
+SQL tables for processing downstream. It imports nothing from this repo and
+shares no configuration with it, so it is deployed by copying the single file.
+
+```cron
+*/30 * * * * /usr/bin/python3 $HOME/perf-eval-sync/cron_artifact_to_sql.py \
+    --since-days 2 --state $HOME/perf-eval-sync/state.json \
+    >> $HOME/perf-eval-sync/sync.log 2>&1
+```
+
+Settings come from an env file — the intended route for cron, which supplies
+almost no environment. It looks for `~/.perf-eval-sync.env` then `~/.env`, or
+pass `--env-file`:
+
+```
+TIGER_SQL_HOST=db.example.com
+TIGER_SQL_PORT=3307
+TIGER_SQL_USER=someone
+TIGER_SQL_PASSWD=...
+TIGER_SQL_DB=tiger_buildkite
+BUILDKITE_API_TOKEN=bkua_...
+```
+
+Keep it `chmod 600` — it holds a database password and an API token, and the job
+warns if the file is readable by others.
+
+**Every write is an upsert** keyed on a content hash, so running twice is
+harmless: a build already loaded is updated in place, never duplicated. The
+state file is therefore only an optimization — it avoids re-downloading
+gigabytes of samples — and a flock stops two runs colliding. It never issues
+DDL; `--check` verifies the tables and columns exist and `--print-schema` prints
+the shape it expects.
 
 | Flag | Effect |
 | --- | --- |
-| `--no-samples` | Skip `samples_*.jsonl`, which are ~99% of the download |
-| `--only-workload NAME` | Restrict to specific workloads; repeatable |
-| `--state FILE` | Record finished jobs so an interrupted scrape resumes |
-| `--dry-run` | Report what would be uploaded without writing |
-| `--reconstruct-commands` | Re-derive `bench_command` / `eval_command` for builds older than the command capture. Only correct while the `run_*` helpers build the same command line — check `git diff` on `lib/run_vllm_bench.sh` and `lib/run_lm_eval.sh` first, which is why it is opt-in |
+| `--since-days N` | window of builds to examine (default 2) |
+| `--build N` / `--range A-B` | specific builds, for a one-time catch-up |
+| `--no-samples` | skip `samples_*.jsonl`, which dominate the volume |
+| `--reload` | ignore the state file and load the selected builds again |
+| `--check` | verify connection and schema, then exit |
+| `--dry-run` | report what would be loaded, write nothing |
 
-`image_digest` is only recorded when the build's image tag is commit-pinned (`nightly-<sha>`). A moving tag like `:nightly` may point somewhere else by the time you scrape, so it is left NULL rather than recorded wrongly.
+`image` and `vllm_commit` come from `run_metadata.json` when present (what
+actually ran) and fall back to the build's `VLLM_IMAGE` / `VLLM_COMMIT` env.
 
-**Ingestion never fails a run.** Every upload path is best-effort: a missing credential, an unreachable host, or a rejected write is logged loudly and the run continues. Results are always written under `results/` and uploaded as Buildkite artifacts, so anything that did not reach SQL can be loaded afterwards from the artifacts of that build. Writes are idempotent: a `dedupe_hash` unique key means re-running a step updates rows instead of duplicating them.
+**Builds predating `run_metadata.json` load eval data but not perf rows.** A
+perf row needs the `isl`/`osl` the bench was asked for, and the raw bench JSON
+records only `max_concurrency`. Those are reported per config and skipped.
 
-Inspect the expected schema, or verify a database against it:
+### Checking connectivity to a database
 
-```bash
-python3 lib/sql_upload.py --print-schema     # expected DDL + ALTERs, no connection
-python3 lib/sql_upload.py --check            # credentials, connectivity, tables, columns
-```
-
-The account used by eval runs only needs `INSERT`/`UPDATE`/`SELECT`. Applying the schema is a separate, manual, admin-account job:
-
-```bash
-python3 lib/sql_upload.py --print-schema | mysql -h <host> -u <admin> -p <database>
-```
-
-`--print-schema` emits the `CREATE TABLE`s followed by `ALTER TABLE ... ADD COLUMN` for the reproduction columns, so it covers both a fresh database and one created before those columns existed. `--check` names any that are absent.
-
-**Credentials.** Five settings, one set of names used everywhere — in the Buildkite secrets, in the Kubernetes secret's keys, in the environment, and in `.sqlconn`:
-
-```
-TIGER_SQL_HOST  TIGER_SQL_PORT  TIGER_SQL_USER  TIGER_SQL_PASSWD  TIGER_SQL_DB
-```
-
-`TIGER_SQL_HOST`, `TIGER_SQL_USER`, and `TIGER_SQL_DB` are required; `TIGER_SQL_PORT` defaults to 3306 and `TIGER_SQL_PASSWD` may be empty. `lib/sql_conn.sh` resolves them, first hit per key wins:
-
-1. **The environment** — a Buildkite step env var, a Kubernetes `secretKeyRef`, or a manual export.
-2. **Buildkite Secrets** — `buildkite-agent secret get TIGER_SQL_PASSWD`, etc.
-3. **A local `.sqlconn` file** — development only. It is gitignored and must stay that way.
-
-Nothing in this repo logs a password: only key names and their source are printed, and the connection summary is rendered redacted.
-
-In CI, store the five values as **Buildkite Secrets** under exactly those names. The generator emits a step-level `secrets:` block listing them, and Buildkite injects each into the job environment under the same name — that is the primary path and it covers agent-run and Kubernetes steps alike. Two constraints come from Buildkite: it needs **agent 3.106.0 or later**, and secrets are **cluster-scoped**, so they must live in the cluster backing that step's queue (the AMD workloads use the `perf_eval` / `mi300_perf_eval` queues).
-
-As a fallback for clusters where that is unavailable, Kubernetes steps also get `secretKeyRef` entries from a cluster secret — `perf-eval-sql` by default, overridable with `SQL_SECRET_NAME`. Either source satisfies the loader, since the environment is read first:
-
-```bash
-kubectl create secret generic perf-eval-sql \
-  --namespace <agent-namespace> \
-  --from-literal=TIGER_SQL_HOST=... \
-  --from-literal=TIGER_SQL_PORT=... \
-  --from-literal=TIGER_SQL_USER=... \
-  --from-literal=TIGER_SQL_PASSWD=... \
-  --from-literal=TIGER_SQL_DB=...
-```
-
-Every ref is `optional: true`, so a missing Kubernetes secret leaves the variables unset rather than blocking the pod from scheduling. That is deliberate, but it means a missing secret degrades **silently**: with no `TIGER_SQL_DB` visible, the destination falls back to the endpoint. `run.sh` prints a `sql-debug:` block naming every setting it found and every source it checked, so a run that went to the wrong place is diagnosable from the log. Pass `INGEST_SINK=sql` to pin the destination regardless of what is detected.
-
-Credentials are never written into the generated pipeline YAML — only the secret *names* appear.
-
-`TIGER_SQL_HOST` may be given as a bare hostname or a URL; a `http://`/`https://`/`mysql://` scheme, trailing path, and embedded port are all normalized away before the driver sees it.
-
-A MySQL driver is required: `pymysql` (preferred, and installed by the pipeline's setup step) or `mysql-connector-python`.
-
-Locally:
-
-```bash
-cat > .sqlconn <<'EOF'
-TIGER_SQL_HOST="db.example.com"
-TIGER_SQL_PORT=3306
-TIGER_SQL_USER="someone"
-TIGER_SQL_PASSWD="..."
-TIGER_SQL_DB="tiger_db"
-EOF
-python3 lib/sql_upload.py --check           # verifies the schema is in place
-./lib/run.sh workloads/qwen3_5_h200.yaml    # TIGER_SQL_DB is set, so results go to SQL
-```
+`lib/sql_connectivity_check.py` is a leftover standalone diagnostic from when results were also written to a SQL database. Nothing in the pipeline uses it. It is kept because it is self-contained and useful for testing whether a host is reachable from a pod (DNS, TCP, MySQL handshake, and optionally credentials), and can be deleted if that is no longer wanted.
 
 ### Trigger a Buildkite build
 
@@ -261,8 +222,6 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
-- `INGEST_SINK` — `endpoint`, `sql`, or `both`. Usually unnecessary: a configured `TIGER_SQL_DB` already routes results to SQL. See [Ingestion destinations](#ingestion-destinations). Don't put credentials in build env vars; they belong in Buildkite Secrets.
-- `SQL_SECRET_NAME` — name of the Kubernetes secret holding the SQL settings for pod-based steps. Defaults to `perf-eval-sql`.
 
 **Example — trigger a build from the Buildkite UI:**
 

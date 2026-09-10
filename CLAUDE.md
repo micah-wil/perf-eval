@@ -38,55 +38,55 @@ exec(open('lib/parse_workload.py').read())
 
 ```bash
 bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh \
-  && bash -n lib/sql_conn.sh
+  && bash -n lib/run_vllm_bench.sh
 ```
 
-**SQL sink schema** — the tables are owned **outside this repo**; nothing in
-`lib/` issues DDL. Dump the expected shape (CREATE plus the reproduction-column
-ALTERs) for a DBA to apply by hand, or verify a live database against it:
+**Results are kept as Buildkite artifacts, not in a database.** The SQL sink was
+removed once the work servers lost access to the database; `ingest.py` and
+`ingest_perf.py` now only POST to the dashboard endpoints. Don't reintroduce a
+database dependency in the run path.
+
+Because the artifacts are the durable record, anything needed to understand or
+reproduce a run has to be written under `results/` before the job ends —
+`artifact_paths: results/**/*` uploads that tree and nothing else. That is what
+`lib/write_run_metadata.py` is for: it records the image digest, vLLM version and
+commit, serve command, server env, and Buildkite identifiers into
+`results/<workload>/run_metadata.json`. If you add a new piece of run context,
+add it there, not to a log line.
+
+Ingestion stays **best-effort and must never fail a run**: every upload catches
+its own errors, and results are still written under `results/` and uploaded as
+artifacts when the endpoint is unreachable. Don't turn any of these into `exit 1`.
+
+`lib/sql_connectivity_check.py` is a leftover standalone diagnostic (no repo
+imports, stdlib-only for the network layers). Nothing in the pipeline calls it;
+it is kept only for testing whether a host is reachable from a pod.
+
+**Cron artifact loader** — `lib/cron_artifact_to_sql.py` pulls finished builds'
+artifacts from Buildkite and loads them into SQL. It runs on a separate host
+(the work servers cannot reach the database) and is **standalone by design**: no
+repo imports, stdlib plus a MySQL driver. Keep it that way — do not make it
+import from `lib/`, and do not add a database dependency back into the run path.
 
 ```bash
-python3 lib/sql_upload.py --print-schema   # no connection needed
-python3 lib/sql_upload.py --check          # reports missing tables OR columns
+python3 lib/cron_artifact_to_sql.py --check
+python3 lib/cron_artifact_to_sql.py --since-days 2 --state ~/perf-eval-sync/state.json
 ```
 
-Never add `CREATE TABLE` / `ALTER TABLE` execution back into the ingest path.
+Writes are `dedupe_hash` upserts, so re-running is safe; it never issues DDL.
+Secrets come from an env file (`~/.perf-eval-sync.env`, then `~/.env`) holding
+the `TIGER_SQL_*` settings and `BUILDKITE_API_TOKEN`. Keep `bench_configs` in
+`run_metadata.json`: the raw bench JSON has no isl/osl, so perf rows cannot be
+rebuilt without it.
 
-Ingestion is **best-effort and must never fail a run**: the SQL preflight in
-`run.sh` is advisory, and every per-task upload catches its own errors. An
-unreachable database must not discard hours of GPU work — the results are still
-written under `results/` and uploaded as Buildkite artifacts, so they can be
-loaded into SQL afterwards. Don't turn any of these back into `exit 1`.
-
-Never commit `.sqlconn`, and never echo `TIGER_SQL_PASSWD` into build logs — in
-CI the credentials come from Buildkite Secrets, not from the repo.
-
-The five settings are `TIGER_SQL_HOST`, `TIGER_SQL_PORT`, `TIGER_SQL_USER`,
-`TIGER_SQL_PASSWD`, `TIGER_SQL_DB` — one set of names for the Buildkite secrets,
-the `perf-eval-sql` Kubernetes secret keys, the environment, and `.sqlconn`. The
-list is declared in three places that must stay in sync: `CONN_KEYS` in
-`lib/sql_upload.py`, `SQL_CONN_KEYS` in `lib/sql_conn.sh`, and `SQL_ENV_VARS` in
-`.buildkite/generate_pipeline.py`.
-
-**Backfilling a build** — `lib/scrapper.py` pulls a finished build's artifacts
-off Buildkite and ingests them, for runs whose upload could not happen. It needs
-the `bk` CLI and `BUILDKITE_API_TOKEN`; it never calls the Buildkite API with
-`curl`. Resumable via `--state`, and every write is an upsert, so re-running a
-build is safe:
+**Retrieving a past build** — the artifacts are the source of truth:
 
 ```bash
-python3 lib/scrapper.py --build 46
-python3 lib/scrapper.py --range 30-46 --state /tmp/scrape.json --dry-run
+bk artifacts download --build 46 --pipeline perf-eval
 ```
 
-`--reconstruct-commands` re-derives `bench_command`/`eval_command` for builds
-older than the command capture by driving the current `run_*` helpers with a
-stubbed binary. That is exact only while those helpers build the same command
-line — diff them against the build's commit before trusting it.
-
-A configured `TIGER_SQL_DB` makes SQL the destination on its own — no
-`INGEST_SINK` needed. Set `INGEST_SINK=endpoint` to force the public endpoint, or
-`both` to write to each.
+Pin reruns by `image_digest` from `run_metadata.json` rather than the image tag;
+a tag such as `:nightly` moves, a digest does not.
 
 If you actually need real validation (parser hitting lm-eval's task registry rather than a stub), `pip install 'lm-eval[api]' pyyaml` first. Without it the parser exits with `cannot validate task names: lm_eval not importable` — that's intentional, never silently skip validation.
 

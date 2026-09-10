@@ -15,38 +15,6 @@ source "$DIR/server.sh"
 source "$DIR/run_lm_eval.sh"
 # shellcheck disable=SC1091
 source "$DIR/run_vllm_bench.sh"
-# shellcheck disable=SC1091
-source "$DIR/sql_conn.sh"
-
-# Resolve the ingestion destination once and hand it to every helper, so the
-# detection in ingest_sink() (a configured TIGER_SQL_DB means SQL) happens here
-# rather than separately in each ingest invocation. The selection is always
-# logged: a run that silently used the endpoint because no credential was
-# visible is otherwise indistinguishable from one that never tried.
-echo "--- :floppy_disk: resolving ingest sink"
-sql_debug_state          # before resolution, so INGEST_SINK shows as given
-INGEST_SINK="$(ingest_sink)"
-export INGEST_SINK
-echo "  sql: ingest sink resolved to ${INGEST_SINK}"
-if [[ "$INGEST_SINK" == "endpoint" ]]; then
-  echo "  sql: no TIGER_SQL_DB visible, so results go to the public endpoint"
-fi
-
-# Credentials and connectivity are probed once up front purely to surface
-# problems early — this is advisory and never fails the run. Ingestion is
-# best-effort: an unreachable database must not throw away hours of GPU work,
-# and the results are still saved and uploaded as Buildkite artifacts, so they
-# can be loaded into SQL afterwards. The tables are expected to already exist
-# and are managed outside this repo; --check only verifies them.
-if sql_sink_enabled; then
-  if ! load_sql_conn; then
-    echo "  sql: cannot resolve credentials — continuing, uploads will be skipped" >&2
-  elif ! python3 "$DIR/sql_upload.py" --check; then
-    echo "  sql: preflight failed — continuing anyway; each task will still try" >&2
-    echo "  sql: results remain available as artifacts for a later manual upload" >&2
-  fi
-fi
-
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
 export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME WORKLOAD_ENV
@@ -72,6 +40,12 @@ start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
 wait_healthy "$PORT"
 
+# Everything under $RESULTS_DIR is uploaded as a Buildkite artifact. The result
+# files carry the numbers and the .cmd files carry the exact commands; this adds
+# the surrounding context (image digest, vLLM build, server env) so a run can be
+# reproduced from its artifacts alone.
+python3 "$DIR/write_run_metadata.py" "$RESULTS_DIR" || true
+
 # vllm bench serve runs first so we can validate perf flow without waiting
 # on a full lm_eval pass. Each config's raw json lands in
 # $RESULTS_DIR/bench-<name>.json and is then transformed and POSTed to the
@@ -92,8 +66,7 @@ while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc speed_subset
     --image "$WORKLOAD_IMAGE" \
     --workload "$WORKLOAD_NAME" \
     --bench-name "$bname" \
-    --isl "$isl" --osl "$osl" --conc "$conc" \
-    --command-file "${RESULTS_DIR}/bench-${bname}.cmd" || true
+    --isl "$isl" --osl "$osl" --conc "$conc" || true
 done <<< "$WORKLOAD_VLLM_BENCH_TSV"
 
 if [[ "${BENCH_ONLY:-}" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss])$ ]]; then
@@ -110,7 +83,6 @@ while IFS=$'\t' read -r task fewshot model_args; do
     --results-dir "${RESULTS_DIR}/${task}" \
     --workload "$WORKLOAD_NAME" \
     --task "$task" \
-    --command-file "${RESULTS_DIR}/${task}.cmd" \
     ${INGEST_NO_SAMPLES:+--no-samples} || true
 done <<< "$WORKLOAD_LM_EVAL_TASKS_TSV"
 
