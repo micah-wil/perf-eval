@@ -174,7 +174,8 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
   ROCM: skipped, set VLLM_IMAGE_ROCM (8 workloads)
   ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
-- `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
+- `PERF_EVAL_RUN_TYPE` — free-form classifier stamped onto every ingested row as `run_type` (e.g. `nightly`, `pr`, `rc`, `aiter_nightly`). The dashboard groups and compares builds by this value, so new categories can be added by just passing a new string — no code change required. Defaults to `adhoc` when unset. Set it at the pipeline/schedule level so it applies to every step.
+- `NIGHTLY` — back-compat shorthand for `PERF_EVAL_RUN_TYPE=nightly`: set to `1` to tag every ingested row with `run_type: nightly` (and `nightly: true`). The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it. Prefer `PERF_EVAL_RUN_TYPE=nightly` going forward.
 
 GPU profiles can set `ecr_pull_through_cache: false` when their cluster pulls
 public ECR images directly. Profiles use the private ECR pull-through cache by

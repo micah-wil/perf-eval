@@ -28,6 +28,22 @@ DEFAULT_ENDPOINT = "https://vllm-perf-data-ingest-224810116257.us-central1.run.a
 AUTH_TOKEN_ENV = "INGEST_BEARER_TOKEN"
 TIMEOUT = 30
 
+# PERF_EVAL_RUN_TYPE classifies a build so the dashboard can group and compare
+# like-with-like: "nightly", "pr", "rc", "aiter_nightly", ... New categories
+# need no code change here -- whatever string the build sets flows through.
+# Unset builds fall back to DEFAULT_RUN_TYPE. NIGHTLY=1 is kept as a back-compat
+# shorthand for PERF_EVAL_RUN_TYPE=nightly.
+RUN_TYPE_ENV = "PERF_EVAL_RUN_TYPE"
+DEFAULT_RUN_TYPE = "adhoc"
+
+
+def run_type() -> str:
+    """Resolve this build's run type from the environment."""
+    value = (os.environ.get(RUN_TYPE_ENV) or "").strip()
+    if not value and os.environ.get("NIGHTLY") == "1":
+        return "nightly"
+    return value or DEFAULT_RUN_TYPE
+
 
 def post(endpoint: str, payload: dict) -> None:
     token = (os.environ.get(AUTH_TOKEN_ENV) or "").strip()
@@ -77,7 +93,10 @@ def transform(raw: dict, args: argparse.Namespace) -> dict:
         "input_tput_per_gpu": input_throughput / tp,
     }
 
-    if os.environ.get("NIGHTLY") == "1":
+    rtype = run_type()
+    data["run_type"] = rtype
+    # nightly stays as a derived boolean so existing /nightly filters keep working.
+    if rtype == "nightly":
         data["nightly"] = True
 
     # Convert *_ms fields to seconds and emit interactivity (1000/tpot_ms).
