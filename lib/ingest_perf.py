@@ -31,18 +31,15 @@ TIMEOUT = 30
 # PERF_EVAL_RUN_TYPE classifies a build so the dashboard can group and compare
 # like-with-like: "nightly", "pr", "rc", "aiter_nightly", ... New categories
 # need no code change here -- whatever string the build sets flows through.
-# Unset builds fall back to DEFAULT_RUN_TYPE. NIGHTLY=1 is kept as a back-compat
-# shorthand for PERF_EVAL_RUN_TYPE=nightly.
+# Unset builds fall back to DEFAULT_RUN_TYPE. This is purely a categorization
+# marker and is independent of NIGHTLY, which drives the nightly behavior.
 RUN_TYPE_ENV = "PERF_EVAL_RUN_TYPE"
 DEFAULT_RUN_TYPE = "adhoc"
 
 
 def run_type() -> str:
-    """Resolve this build's run type from the environment."""
-    value = (os.environ.get(RUN_TYPE_ENV) or "").strip()
-    if not value and os.environ.get("NIGHTLY") == "1":
-        return "nightly"
-    return value or DEFAULT_RUN_TYPE
+    """Resolve this build's run-type marker from the environment."""
+    return (os.environ.get(RUN_TYPE_ENV) or "").strip() or DEFAULT_RUN_TYPE
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -93,10 +90,10 @@ def transform(raw: dict, args: argparse.Namespace) -> dict:
         "input_tput_per_gpu": input_throughput / tp,
     }
 
-    rtype = run_type()
-    data["run_type"] = rtype
-    # nightly stays as a derived boolean so existing /nightly filters keep working.
-    if rtype == "nightly":
+    # run_type is a categorization marker only; NIGHTLY independently drives the
+    # nightly behavior and stays the sole source of the nightly flag.
+    data["run_type"] = run_type()
+    if os.environ.get("NIGHTLY") == "1":
         data["nightly"] = True
 
     # Convert *_ms fields to seconds and emit interactivity (1000/tpot_ms).

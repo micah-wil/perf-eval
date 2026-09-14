@@ -49,18 +49,15 @@ NIGHTLY_ENV = "NIGHTLY"
 # PERF_EVAL_RUN_TYPE classifies a build ("nightly", "pr", "rc", "aiter_nightly",
 # ...) so the dashboard can group and compare like-with-like. New categories
 # need no code change -- whatever string the build sets flows through. Unset
-# builds fall back to DEFAULT_RUN_TYPE; NIGHTLY=1 is a back-compat shorthand for
-# PERF_EVAL_RUN_TYPE=nightly.
+# builds fall back to DEFAULT_RUN_TYPE. This is purely a categorization marker
+# and is independent of NIGHTLY, which drives the nightly behavior.
 RUN_TYPE_ENV = "PERF_EVAL_RUN_TYPE"
 DEFAULT_RUN_TYPE = "adhoc"
 
 
 def run_type() -> str:
-    """Resolve this build's run type from the environment."""
-    value = (os.environ.get(RUN_TYPE_ENV) or "").strip()
-    if not value and os.environ.get(NIGHTLY_ENV) == "1":
-        return "nightly"
-    return value or DEFAULT_RUN_TYPE
+    """Resolve this build's run-type marker from the environment."""
+    return (os.environ.get(RUN_TYPE_ENV) or "").strip() or DEFAULT_RUN_TYPE
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -92,10 +89,10 @@ def metadata(workload: str, task: str) -> dict:
         v = (os.environ.get(env_key) or "").strip()
         if v:
             md[field] = v
-    rtype = run_type()
-    md["run_type"] = rtype
-    # nightly stays as a derived boolean so existing /nightly filters keep working.
-    if rtype == "nightly":
+    # run_type is a categorization marker only; NIGHTLY independently drives the
+    # nightly behavior and stays the sole source of the nightly flag.
+    md["run_type"] = run_type()
+    if os.environ.get(NIGHTLY_ENV) == "1":
         md["nightly"] = True
     return md
 
