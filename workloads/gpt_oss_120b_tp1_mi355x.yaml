@@ -1,5 +1,5 @@
-# openai/gpt-oss-120b on MI355X (migrated from vllm-dashboard nightly)
-name: gpt-oss-120b-tp1-mi355x
+# GPT-OSS 120B on MI355X
+name: gpt_oss_120b-mi355x
 gpu: MI355X
 num_gpus: 8
 nightly: true
@@ -10,29 +10,42 @@ vllm:
     VLLM_ROCM_USE_AITER: 1
   serve_args: >-
     --tensor-parallel-size 1
-    --kv-cache-dtype fp8
     --trust-remote-code
-    --no-enable-prefix-caching
+    --kv-cache-dtype=fp8
+
+lm_eval:
+  model_args:
+    tokenized_requests: false
+    tokenizer_backend: null
+    timeout: 6000
+  tasks:
+    - name: gsm8k
+      num_fewshot: 5
+      model_args:
+        num_concurrent: 64
+        max_length: 32768
+        max_gen_toks: 8192
 
 vllm_bench:
   configs:
-    - name: 1k-in-1k-out-conc-8
+    - name: 8k-in-1k-out
+      backend: openai
+      dataset: random
+      input_len: 8192
+      output_len: 1024
+      num_prompts: 512
+      max_concurrency: 128
+      speed_bench_dataset_subset: throughput_8k
+      speed_bench_category: low_entropy
+
+vllm_bench:
+  configs:
+    - name: 8k-in-1k-out
       backend: openai
       dataset: random
       input_len: 1024
       output_len: 1024
-      num_prompts: 80
-      max_concurrency: 8
-      args:
-        num_warmups: 1
-        temperature: 0
-    - name: 1k-in-1k-out-conc-16
-      backend: openai
-      dataset: random
-      input_len: 1024
-      output_len: 1024
-      num_prompts: 160
-      max_concurrency: 16
-      args:
-        num_warmups: 1
-        temperature: 0
+      num_prompts: [10, 256, 512]
+      max_concurrency: [1, 64, 128]
+      speed_bench_dataset_subset: throughput_8k
+      speed_bench_category: low_entropy

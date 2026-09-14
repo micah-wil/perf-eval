@@ -40,6 +40,13 @@ exec(open('lib/parse_workload.py').read())
 bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh
 ```
 
+**Ingestion auth and pipeline generation:**
+
+```bash
+python3 -m unittest discover -s tests -p 'test_ingest_auth.py'
+python3 .buildkite/test_generate_pipeline.py
+```
+
 If you actually need real validation (parser hitting lm-eval's task registry rather than a stub), `pip install 'lm-eval[api]' pyyaml` first. Without it the parser exits with `cannot validate task names: lm_eval not importable` — that's intentional, never silently skip validation.
 
 ## Launching a Buildkite build
@@ -69,7 +76,7 @@ Pipeline metadata:
    - `commit: "<full SHA>"`
    - `branch: "<branch name>"` (use the actual branch, not `main`, when testing a feature branch)
    - `message: "<short description of what this tests>"` — match the existing convention: short, action-oriented (e.g. "Add gpqa diamond", "Writable HF_HOME for lm_eval datasets cache"). No emoji unless the user asks.
-   - `environment`: always pass both `VLLM_COMMIT` (the vLLM SHA being tested) and `VLLM_IMAGE` (the full Docker image URI). Optionally pass `WORKLOADS` for an explicit workload list; omit it to run all `nightly: true` workloads.
+   - `environment`: always pass both `VLLM_COMMIT` (the vLLM SHA being tested) and `VLLM_IMAGE` (the full Docker image URI). When CUDA and ROCm are unrelated artifacts, pass `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` instead — each overrides all other image selection for its platform, and a platform with neither its own pin nor `VLLM_IMAGE` has its workloads skipped. Optionally pass `WORKLOADS` for an explicit workload list; omit it to run all `nightly: true` workloads.
 
    With `bk` (run `bk auth status` first):
 

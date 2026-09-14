@@ -27,24 +27,28 @@ GPU allocation; use at most 8 GPUs to keep the workload on one B200 node.
 
 ### Recipe schema
 
-A recipe has top-level metadata plus up to three eval blocks:
+A recipe has top-level metadata plus up to four eval blocks:
 
 - **`vllm:`** — *how the server runs.* Defines what model to serve and how (`model`, `serve_args`, optional image/env overrides). Required.
 - **`lm_eval:`** — *what accuracy to measure.* Lists lm-evaluation-harness tasks to run against the live server (e.g. `gsm8k`, `aime25`). Each task's score is saved under `results/<name>/<task-name>/`. Optional.
 - **`vllm_bench:`** — *what perf to measure.* Lists `vllm bench serve` configs (input/output lengths, concurrency, dataset). Raw JSON is saved and ingested into the perf dashboard. Optional.
+- **`aiperf:`** — *what perf to measure with [aiperf](https://pypi.org/project/aiperf/).* Lists `aiperf profile` configs for scenarios `vllm bench serve` doesn't cover (e.g. prefix-cache sweeps, server-side token counting). aiperf is pip-installed at run time because the vLLM images don't ship it. Artifacts are saved under `results/<name>/aiperf-<config>/` and uploaded as Buildkite artifacts; there is no dashboard ingest yet. Optional.
 - **`bfcl:`** — *function-calling eval.* Runs [BFCL](https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard) test categories against the live server. Some models need `--enable-auto-tool-choice` and `--tool-call-parser` in `serve_args`. Results are transformed to lm_eval format and ingested as `bfcl_<category>` tasks. Optional.
 
-Include one or more of `lm_eval:` / `vllm_bench:` / `bfcl:` depending on what you want out of this recipe.
+Include one or more of `lm_eval:` / `vllm_bench:` / `aiperf:` / `bfcl:` depending on what you want out of this recipe.
 
 ```yaml
 name: qwen3_5-h200       # used in container name and results/<name>/
 gpu: H200                # picks queue/image/HF cache from lib/gpu_profiles.yaml
 num_gpus: 8
 nightly: true            # include in the nightly schedule (default: false)
+timeout_in_minutes: 180  # Buildkite step timeout (default: 120)
 
 vllm:                    # how the server is brought up
   model: Qwen/Qwen3.5-397B-A17B-FP8
   image: vllm/vllm-openai:nightly      # optional; falls back to VLLM_IMAGE / VLLM_COMMIT / latest
+  startup_timeout_s: 3600               # optional; /health wait (default: 3600)
+  pin_image: true                       # optional; keep `image` even when VLLM_IMAGE / VLLM_COMMIT are set
   env:                                  # optional; merged over the GPU profile's env
     SOME_VAR: value
   serve_args: >-                        # appended to `vllm serve <model>`; word-split
@@ -77,26 +81,44 @@ bfcl:                    # function-calling eval (optional)
 
 vllm_bench:              # perf runs (optional) — fed to the perf dashboard
   configs:
-    - name: 1k-in-1k-out-conc-256
+    - name: 1k-in-1k-out
       backend: openai                 # /v1/completions — exact ISL/OSL, no chat template
       dataset: random                 # synthetic fixed-length throughput dataset
       input_len: 1024
       output_len: 1024
       num_prompts: 500
-      max_concurrency: 256
+      max_concurrency: [1, 64, 256]     # single value, or a list to sweep concurrency
+      repetitions: 3                    # median-aggregate three complete runs
       args:                             # optional vllm bench serve arguments
-        num_warmups: 16                 # becomes --num-warmups 16
+        num_warmups: 256                # one warmup wave before every measured run
         disable_tqdm: true              # becomes --disable-tqdm
+
+aiperf:                 # perf runs via the aiperf CLI (optional)
+  configs:
+    - name: prefix63k-in4760-out350-conc16-24
+      args:                             # everything except model/tokenizer/url/api-key/output-artifact-dir
+        endpoint-type: chat             # becomes --endpoint-type chat
+        streaming: true                 # becomes --streaming
+        concurrency: "16,24"            # comma lists stay strings: --concurrency 16,24
+        request-count: "80,120"
+        extra-inputs:                   # a list repeats the flag
+          - "ignore_eos:true"           # --extra-inputs ignore_eos:true
+          - "max_tokens:350"
 ```
 
 A few things worth knowing:
 
 - **`gpu`** must match a key in `lib/gpu_profiles.yaml`. The profile sets the Buildkite queue, default image, HF cache path, and baseline env vars.
+- **`vllm.image` is normally just a fallback.** The `VLLM_IMAGE` / `VLLM_COMMIT` build-time env vars override it, which is what you want for nightly perf tracking across a specific vLLM commit. Set **`pin_image: true`** only as a rare escape hatch for a model that genuinely cannot be served by the nightly under test (e.g. support landed in a dedicated image but not yet in nightly) — it makes the workload keep its own `image` regardless of the override. Do not pin models that current nightlies already serve.
 - **`nightly`** controls only the nightly schedule. Recipes with `nightly: false` (or omitted) are still triggerable explicitly via the `WORKLOADS` env var.
+- **`timeout_in_minutes`** overrides the Buildkite step timeout (default: `120`). This is separate from `lm_eval.model_args.timeout`, which controls individual API requests.
 - **`lm_eval.tasks` is a list** because each entry runs as a separate `lm_eval` invocation — `--num_fewshot` is a single global flag, so different shot counts need separate runs. Each task's results land in `results/<name>/<task-name>/`.
 - **`vllm_bench` runs first** if both blocks are present — that way perf-pipeline bugs surface quickly instead of waiting on a full lm-eval pass.
 - **`vllm_bench` uses the `random` dataset with `--ignore-eos`** so every request prefills exactly `input_len` and decodes exactly `output_len` tokens — that's what makes the per-GPU decode throughput meaningful. Pair it with `backend: openai` (the `/v1/completions` endpoint) for exact token control. Avoid `dataset: speed_bench` for throughput numbers: it requires `--skip-tokenizer-init`, which makes `vllm bench serve` cap every request at a single output token, so output throughput reads as ~0.
+- **`vllm_bench.configs[].max_concurrency` may be a single value or a list.** Each run's name is always `<name>-conc-<value>`, so the config `name` is the shape description *without* the concurrency (e.g. `name: 8k-in-1k-out`). A scalar (`max_concurrency: 128`) produces one run (`8k-in-1k-out-conc-128`); a list (`max_concurrency: [1, 64, 128]`) sweeps concurrency and fans out into one run per value, so you don't have to copy a config per concurrency. `num_prompts` can stay a single value (applied to every run) or, when `max_concurrency` is a list, be a list of the same length to set a per-concurrency request count (e.g. to keep `num_prompts` proportional to concurrency).
 - **`vllm_bench.configs[].args` forwards additional options to `vllm bench serve`.** Keys may use underscores, hyphens, or a leading `--`; they are normalized to `--kebab-case`. A `true` value emits a standalone flag, `false` and `null` omit it, scalar values emit a flag/value pair, and lists repeat the flag. Options managed by perf-eval itself, including the model, endpoint, dataset, request counts, lengths, concurrency, and result path, remain top-level config fields and cannot be overridden through `args`.
+- **`vllm_bench.configs[].repetitions` repeats the complete benchmark on the same server and median-aggregates every numeric scalar before ingestion.** It defaults to `1` and must be a positive odd integer. For repeated configs, every raw run is retained as `bench-<run-name>-run-<n>.json`; the median aggregate remains `bench-<run-name>.json`, where `<run-name>` is the `-conc-<value>` suffixed name. Repetitions apply to every concurrency in a sweep, so a 3-value sweep with `repetitions: 3` is nine measured runs. `args.num_warmups` applies independently to every repetition; it is a single value shared by the whole sweep, so pick it for the highest concurrency you sweep to.
+- **`aiperf` is a client-side load generator** run against the live server (`http://127.0.0.1:<port>`). The wrapper owns `--model`, `--tokenizer` (defaults to the served model), `--url`, `--api-key EMPTY`, and `--output-artifact-dir`; every other flag goes under `args` and follows the same normalization as `vllm_bench.configs[].args` (underscores/hyphens/`--` prefix accepted, `true` emits a bare flag, lists repeat the flag, comma-separated sweep values like `concurrency: "16,24"` should stay quoted strings). Because the vLLM images don't ship aiperf, it is `pip install`ed on first use (into the container for Docker runtime, into the job Python for native runtime).
 - **`bfcl` may need tool-call serve args.** Some models require `--enable-auto-tool-choice` and `--tool-call-parser` for function-calling; the parser warns if `--tool-call-parser` is absent. Each category runs as a separate generate + evaluate pass; scores appear on the eval dashboard as `bfcl_<category>` tasks.
 - **`bfcl.maximum_step_limit`** caps how many inference steps BFCL allows per multi-turn turn (default 10 in perf-eval; BFCL upstream defaults to 20). Set it in the workload YAML, or override per-run with the `BFCL_MAXIMUM_STEP_LIMIT` env var (env wins over YAML). Useful for agentic / long multi-turn categories.
 - **`bfcl.max_test_cases`** subsamples a category instead of running the full set — e.g. `multi_turn` (~800 cases) down to 300. For aggregate groups with multiple subcategories, the cap is split evenly across subcategories (by BFCL id order within each). Set a single integer to cap every category, or a map per category (`multi_turn: 240`). Override per-run with `BFCL_MAX_TEST_CASES`. Scores are partial-eval only and are not comparable to full BFCL leaderboard numbers.
@@ -119,7 +141,14 @@ A cluster with fast shared storage can keep a warm, cross-run cache by overridin
 
 Do **not** set an `hf_home` under a node path like `/mnt/shared` unless that path is a real mount on every node in the queue — with the default `emptyDir` that only changes the in-pod path, but if you also point the volume at a `hostPath`, an unmounted path lands the cache on the node root disk with no reclamation.
 
-Run the generator's tests with `python3 .buildkite/test_generate_pipeline.py` (stdlib + pyyaml only; no GPU needed).
+Run the CPU-only regression tests with:
+
+```bash
+python3 .buildkite/test_generate_pipeline.py
+python3 .buildkite/test_benchmark_repetitions.py
+```
+
+They require only the standard library and PyYAML; the Buildkite bootstrap runs both before uploading GPU steps.
 
 ### Trigger a Buildkite build
 
@@ -130,12 +159,31 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
 **Required env vars** — both must be set on every build:
 
 - `VLLM_COMMIT` — vLLM commit SHA being tested. Used to tag results and track which vLLM version produced them.
-- `VLLM_IMAGE` — full Docker image URI (e.g. `vllm/vllm-openai:nightly-abc1234`). This is the image that gets pulled and run.
+- `VLLM_IMAGE` — full Docker image URI (e.g. `vllm/vllm-openai:nightly-abc1234`). This is the image that gets pulled and run. AMD workloads use it only if the ref names a ROCm image; otherwise they fall back to `vllm/vllm-openai-rocm:nightly-<VLLM_COMMIT>`.
 
 **Optional env vars:**
 
+- `VLLM_IMAGE_CUDA` / `VLLM_IMAGE_ROCM` — that platform's image URI, for a build whose CUDA and ROCm images are unrelated artifacts (a release candidate tagged `myrepo/vllm:v0.12.0rc2` on CUDA and `myrepo/amd-vllm:rc2-final` on ROCm, say). Each one overrides every other image choice for the workloads on its platform — `VLLM_IMAGE`, `VLLM_COMMIT`, and the workload's own `vllm.image`. The one exception is a workload with `pin_image: true`, which by definition cannot run anything but its own image, so it keeps it and is never skipped.
+
+  Pin one platform and the other's workloads are **skipped** (`no ROCM image: set VLLM_IMAGE_ROCM`), on the grounds that a build naming its images per platform names every platform it wants run: benchmarking whatever else was lying around and labelling it with this build's commit is worse than not running. Set `VLLM_IMAGE` alongside the pin to cover the rest, or pin both platforms. Skipped steps are hidden in the build view until you toggle *Skipped jobs*.
+
+  To check what a build settled on, read the **generate steps** job log: it names the image each platform resolved to, and the workload count behind it, before any GPU is booked. Each workload's own log then opens with the image and commit that job resolved (B200 pods pull the ECR pull-through mirror of that ref; the AMD clusters have no cache credentials and pull public ECR directly).
+
+  ```
+  CUDA: myrepo/vllm:v0.12.0rc2 (12 workloads)
+  ROCM: skipped, set VLLM_IMAGE_ROCM (8 workloads)
+  ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
+
+GPU profiles can set `ecr_pull_through_cache: false` when their cluster pulls
+public ECR images directly. Profiles use the private ECR pull-through cache by
+default.
+
+Result uploads authenticate with `Authorization: Bearer ...`. Buildkite jobs
+retrieve `INGEST_BEARER_TOKEN` from the CI cluster's secret store immediately
+before running the workload; do not put the token in build environment settings
+or workload YAML. Local runs that upload results must export the same variable.
 
 **Example — trigger a build from the Buildkite UI:**
 

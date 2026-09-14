@@ -15,11 +15,14 @@ source "$DIR/server.sh"
 source "$DIR/run_lm_eval.sh"
 # shellcheck disable=SC1091
 source "$DIR/run_vllm_bench.sh"
+# shellcheck disable=SC1091
+source "$DIR/run_aiperf.sh"
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
 export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME
+echo "image: $WORKLOAD_IMAGE  commit: ${WORKLOAD_VLLM_COMMIT:-unknown}"
 
-PORT=8000
+PORT="${PERF_EVAL_SERVER_PORT:-$(pick_server_port)}"
 CONTAINER="perf-eval-${WORKLOAD_NAME}-$$"
 RESULTS_DIR="results/${WORKLOAD_NAME}"
 BASE_URL="http://localhost:${PORT}"
@@ -34,17 +37,18 @@ trap 'stop_server "$CONTAINER"' EXIT
 
 start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
-wait_healthy "$PORT"
+wait_healthy "$PORT" "$WORKLOAD_SERVER_STARTUP_TIMEOUT" "$WORKLOAD_MODEL"
 
 # vllm bench serve runs first so we can validate perf flow without waiting
 # on a full lm_eval pass. Each config's raw json lands in
 # $RESULTS_DIR/bench-<name>.json and is then transformed and POSTed to the
 # perf dashboard ingest endpoint.
-while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc speed_subset speed_category extra_args; do
+while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc repetitions speed_subset speed_category extra_args; do
   [[ -z "$bname" ]] && continue
   run_vllm_bench "$CONTAINER" "$PORT" "$WORKLOAD_MODEL" \
                  "$bname" "$backend" "$dataset" "$isl" "$osl" "$nprompts" \
-                 "$conc" "$speed_subset" "$speed_category" "$extra_args" \
+                 "$conc" "$speed_subset" "$speed_category" "$repetitions" \
+                 "$extra_args" \
                  "$BENCH_TRUST_REMOTE_CODE" "$RESULTS_DIR"
 
   python3 "$DIR/ingest_perf.py" \
@@ -56,6 +60,14 @@ while IFS=$'\t' read -r bname backend dataset isl osl nprompts conc speed_subset
     --image "$WORKLOAD_IMAGE" \
     --isl "$isl" --osl "$osl" --conc "$conc" || true
 done <<< "$WORKLOAD_VLLM_BENCH_TSV"
+
+# aiperf profile runs (perf, like vllm_bench). Artifacts are uploaded via the
+# Buildkite artifact_paths glob; there is no dashboard ingest for aiperf yet.
+while IFS=$'\t' read -r aname aargs; do
+  [[ -z "$aname" ]] && continue
+  run_aiperf "$CONTAINER" "$PORT" "$WORKLOAD_MODEL" \
+             "$aname" "$aargs" "$RESULTS_DIR"
+done <<< "$WORKLOAD_AIPERF_TSV"
 
 if [[ "${BENCH_ONLY:-}" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss])$ ]]; then
   echo "--- :stopwatch: BENCH_ONLY set; skipping lm_eval and bfcl tasks"

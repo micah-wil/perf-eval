@@ -7,10 +7,15 @@ projects it into shell variables: top-level metadata, server config
 (image, model, serve_args, env, runtime), the lm_eval task list, the
 vllm_bench config list, and bench ingest metadata (device/tp/precision).
 
-Image precedence: VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
-`vllm/vllm-openai:latest`. When BENCH_ONLY is truthy, lm_eval task names
-are not validated against the registry (because they will not run).
+Image precedence: VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM (whichever matches the
+workload's GPU) > VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
+`vllm/vllm-openai:latest`. A build that pins images per platform but not this
+workload's, and sets no VLLM_IMAGE, has nothing to run here and is an error.
+When BENCH_ONLY is truthy, lm_eval task names are not validated against the
+registry (because they will not run).
 """
+
+from __future__ import annotations
 
 import base64
 import json
@@ -24,7 +29,7 @@ import yaml
 TASK_FIELDS = {"name", "num_fewshot", "model_args"}
 BENCH_FIELDS = {
     "name", "backend", "dataset", "input_len", "output_len",
-    "num_prompts", "max_concurrency", "args",
+    "num_prompts", "max_concurrency", "repetitions", "args",
     "speed_bench_dataset_subset", "speed_bench_category",
 }
 BENCH_REQUIRED = ("name", "input_len", "output_len", "num_prompts", "max_concurrency")
@@ -35,6 +40,11 @@ BENCH_RESERVED_ARGS = {
     "speed-bench-output-len", "speed-bench-dataset-subset",
     "speed-bench-category", "skip-tokenizer-init", "save-result",
     "result-filename",
+}
+AIPERF_FIELDS = {"name", "args"}
+AIPERF_REQUIRED = ("name",)
+AIPERF_RESERVED_ARGS = {
+    "model", "tokenizer", "url", "api-key", "output-artifact-dir",
 }
 BFCL_FIELDS = {
     "test_categories", "num_threads", "temperature",
@@ -102,19 +112,69 @@ def load_profile(gpu: str, workload_path: str) -> dict:
     return profiles[gpu]
 
 
+def platform_of(profile: dict) -> str:
+    """The platform a profile runs, from the repo its images come from."""
+    repo = (profile.get("image_repo") or "").strip() or "vllm/vllm-openai"
+    return "ROCM" if "rocm" in repo.lower() else "CUDA"
+
+
+def platform_image(profile: dict) -> str:
+    """VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM — this platform's image, if pinned.
+
+    For a build whose platforms are separate artifacts with unrelated tags,
+    which nothing else here can name.
+    """
+    return (os.environ.get(f"VLLM_IMAGE_{platform_of(profile)}") or "").strip()
+
+
+def pins_only_other_platforms(profile: dict) -> bool:
+    """True when the build pins per-platform images, but not this platform's."""
+    mine = f"VLLM_IMAGE_{platform_of(profile)}"
+    return any(
+        (os.environ.get(k) or "").strip()
+        for k in ("VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM")
+        if k != mine
+    )
+
+
 def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
-    """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload."""
+    """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload.
+
+    A workload that sets ``pin_image: true`` keeps its own ``vllm.image`` even
+    when VLLM_IMAGE / VLLM_COMMIT or a platform pin are set. Use it for models
+    that only exist in a dedicated image (e.g. kimi-k3, minimax-m3) where the
+    nightly override would pull an image that cannot serve the model. Failing
+    that, VLLM_IMAGE_CUDA / VLLM_IMAGE_ROCM decide their own platform.
+    """
     override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
     # ROCm images are located at vllm/vllm-openai-rocm. The default
     # images (CUDA) are stored at vllm/vllm-openai
     custom_repo = (profile.get("image_repo") or "").strip()
     repo = custom_repo or "vllm/vllm-openai"
-    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
-    if override_image and (not custom_repo or "rocm" in override_image.lower()):
-        return override_image, override_commit or commit_from_image(override_image)
+    if vllm.get("pin_image") is True and vllm.get("image"):
+        image = vllm["image"]
+        return image, commit_from_image(str(image))
+    platform_pin = platform_image(profile)
+    if platform_pin:
+        return platform_pin, override_commit or commit_from_image(platform_pin)
+    # This build pins images per platform and didn't pin ours. The generator
+    # skips these workloads, so only a direct run.sh gets here.
+    if pins_only_other_platforms(profile) and not override_image:
+        platform = platform_of(profile)
+        sys.exit(f"no {platform} image: set VLLM_IMAGE_{platform} or VLLM_IMAGE")
 
-    commit = override_commit or commit_from_image(override_image)
+    # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image.
+    # A CUDA release image may embed a commit in its tag, but that must not
+    # implicitly select an unrelated ROCm nightly for AMD jobs.
+    if override_image:
+        if not custom_repo or "rocm" in override_image.lower():
+            return override_image, override_commit or commit_from_image(override_image)
+        if not override_commit:
+            image = vllm.get("image", f"{repo}:nightly")
+            return image, commit_from_image(str(image))
+
+    commit = override_commit
     if commit:
         return f"{repo}:nightly-{commit}", commit
 
@@ -188,31 +248,89 @@ def normalize_bench_arg_name(name: str) -> str:
     return name.lstrip("-").replace("_", "-")
 
 
-def encode_bench_args(args: object, config_name: str, path: str) -> str:
+def encode_arg_map(
+    args: object, config_name: str, path: str, reserved: set, kind: str
+) -> str:
+    """Normalize a config `args` map to `--kebab-case` keys and base64-encode it.
+
+    Shared by vllm_bench and aiperf; each passes its own set of wrapper-owned
+    reserved options that a workload must not override.
+    """
     if args is None:
         args = {}
     if not isinstance(args, dict):
-        sys.exit(f"{path}: vllm_bench config {config_name!r} args must be a map")
+        sys.exit(f"{path}: {kind} config {config_name!r} args must be a map")
     normalized = {}
     for name, value in args.items():
         if not isinstance(name, str) or not normalize_bench_arg_name(name):
             sys.exit(
-                f"{path}: vllm_bench config {config_name!r} args keys must be non-empty strings"
+                f"{path}: {kind} config {config_name!r} args keys must be non-empty strings"
             )
         normalized_name = normalize_bench_arg_name(name)
-        if normalized_name in BENCH_RESERVED_ARGS:
+        if normalized_name in reserved:
             sys.exit(
-                f"{path}: vllm_bench config {config_name!r} args cannot override "
+                f"{path}: {kind} config {config_name!r} args cannot override "
                 f"wrapper-owned option --{normalized_name}"
             )
         if normalized_name in normalized:
             sys.exit(
-                f"{path}: vllm_bench config {config_name!r} args contains duplicate "
+                f"{path}: {kind} config {config_name!r} args contains duplicate "
                 f"option --{normalized_name} after normalization"
             )
         normalized[normalized_name] = value
     payload = json.dumps(normalized, separators=(",", ":")).encode()
     return base64.b64encode(payload).decode()
+
+
+def encode_bench_args(args: object, config_name: str, path: str) -> str:
+    return encode_arg_map(args, config_name, path, BENCH_RESERVED_ARGS, "vllm_bench")
+
+
+def expand_bench_config(c: dict, path: str) -> list:
+    """Expand a bench config's concurrency sweep into concrete runs.
+
+    max_concurrency may be a single int or a list of
+    them (one run per value). Either way each run's name is suffixed with
+    `-conc-<value>`, so the config name is the shape description without the
+    concurrency. `num_prompts` is either a single value applied to every run,
+    or — only when `max_concurrency` is a list — a list of the same length
+    giving a per-concurrency request count. Returns a list of
+    (name, num_prompts, max_concurrency) tuples.
+    """
+    name = c["name"]
+    mc = c["max_concurrency"]
+    npr = c["num_prompts"]
+    is_sweep = isinstance(mc, list)
+
+    concs = mc if is_sweep else [mc]
+    if is_sweep and not concs:
+        sys.exit(f"{path}: vllm_bench config {name!r} has an empty max_concurrency list")
+
+    if isinstance(npr, list):
+        if not is_sweep:
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts may only be a list when "
+                f"max_concurrency is a list"
+            )
+        if len(npr) != len(concs):
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts list has {len(npr)} entries "
+                f"but max_concurrency has {len(concs)}"
+            )
+        nprompts = npr
+    else:
+        nprompts = [npr] * len(concs)
+    for v in nprompts:
+        if not (isinstance(v, int) and v > 0):
+            sys.exit(
+                f"{path}: vllm_bench config {name!r} num_prompts must be a positive integer "
+                f"(or a list of them matching max_concurrency)"
+            )
+
+    return [
+        (f"{name}-conc-{conc}", n, conc)
+        for conc, n in zip(concs, nprompts)
+    ]
 
 
 def bench_tsv(configs: list, path: str) -> str:
@@ -228,27 +346,76 @@ def bench_tsv(configs: list, path: str) -> str:
         for k in BENCH_REQUIRED:
             if c.get(k) is None:
                 sys.exit(f"{path}: vllm_bench config {c.get('name')!r} missing required field {k!r}")
-        if c["name"] in seen:
-            sys.exit(f"{path}: duplicate vllm_bench config name {c['name']!r}")
-        seen.add(c["name"])
+
+        repetitions = c.get("repetitions", 1)
+        if (
+            isinstance(repetitions, bool)
+            or not isinstance(repetitions, int)
+            or repetitions < 1
+            or repetitions % 2 == 0
+        ):
+            sys.exit(
+                f"{path}: vllm_bench config {c['name']!r} repetitions must be "
+                "a positive odd integer"
+            )
 
         def opt(key):
-            v = c.get(key)
+            v = c.get(key)  # noqa: B023
             return str(v) if v not in (None, "") else "-"
 
+        encoded_args = encode_bench_args(c.get("args"), c["name"], path)
+        for run_name, nprompts, conc in expand_bench_config(c, path):
+            if run_name in seen:
+                sys.exit(f"{path}: duplicate vllm_bench config name {run_name!r}")
+            seen.add(run_name)
+            lines.append(
+                "\t".join(
+                    [
+                        run_name,
+                        opt("backend"),
+                        str(c.get("dataset", "random")),
+                        str(c["input_len"]),
+                        str(c["output_len"]),
+                        str(nprompts),
+                        str(conc),
+                        str(repetitions),
+                        opt("speed_bench_dataset_subset"),
+                        opt("speed_bench_category"),
+                        encoded_args,
+                    ]
+                )
+            )
+    return "\n".join(lines)
+
+
+def aiperf_tsv(configs: list, path: str) -> str:
+    """Emit one row per aiperf config: name plus base64-encoded arg map.
+
+    The wrapper owns --model, --tokenizer, --url, --api-key, and
+    --output-artifact-dir; everything else the profile needs goes under `args`.
+    """
+    seen = set()
+    lines = []
+    for c in configs:
+        extra = set(c) - AIPERF_FIELDS
+        if extra:
+            sys.exit(
+                f"{path}: aiperf config {c.get('name')!r} has unsupported "
+                f"fields {sorted(extra)}; allowed: {sorted(AIPERF_FIELDS)}"
+            )
+        for k in AIPERF_REQUIRED:
+            if c.get(k) is None:
+                sys.exit(f"{path}: aiperf config {c.get('name')!r} missing required field {k!r}")
+        if c["name"] in seen:
+            sys.exit(f"{path}: duplicate aiperf config name {c['name']!r}")
+        seen.add(c["name"])
         lines.append(
             "\t".join(
                 [
                     c["name"],
-                    opt("backend"),
-                    str(c.get("dataset", "random")),
-                    str(c["input_len"]),
-                    str(c["output_len"]),
-                    str(c["num_prompts"]),
-                    str(c["max_concurrency"]),
-                    opt("speed_bench_dataset_subset"),
-                    opt("speed_bench_category"),
-                    encode_bench_args(c.get("args"), c["name"], path),
+                    encode_arg_map(
+                        c.get("args"), c["name"], path, AIPERF_RESERVED_ARGS, "aiperf"
+                    ),
                 ]
             )
         )
@@ -342,19 +509,30 @@ def main(path: str) -> None:
     lm_eval = data.get("lm_eval") or {}
     bench = data.get("vllm_bench") or {}
 
+    aiperf = data.get("aiperf") or {}
+
     tasks = lm_eval.get("tasks") or []
     bfcl = data.get("bfcl") or {}
     bench_configs = bench.get("configs") or []
+    aiperf_configs = aiperf.get("configs") or []
 
-    if not tasks and not bench_configs and not bfcl:
+    if not tasks and not bench_configs and not bfcl and not aiperf_configs:
         sys.exit(
-            f"{path}: workload must define at least one of lm_eval, vllm_bench, or bfcl"
+            f"{path}: workload must define at least one of lm_eval, vllm_bench, "
+            f"aiperf, or bfcl"
         )
 
     if tasks:
         validate_tasks(tasks, path)
 
     serve_args = vllm.get("serve_args") or ""
+    startup_timeout_s = vllm.get("startup_timeout_s", 3600)
+    if (
+        isinstance(startup_timeout_s, bool)
+        or not isinstance(startup_timeout_s, int)
+        or startup_timeout_s < 1
+    ):
+        sys.exit(f"{path}: vllm.startup_timeout_s must be a positive integer")
     if bfcl:
         validate_bfcl(bfcl, serve_args, path)
 
@@ -373,10 +551,12 @@ def main(path: str) -> None:
     emit("VLLM_COMMIT", vllm_commit)
     emit("MODEL", vllm.get("model", ""))
     emit("SERVE_ARGS", serve_args)
+    emit("SERVER_STARTUP_TIMEOUT", startup_timeout_s)
     emit("SERVER_RUNTIME", profile.get("server_runtime", "docker"))
     emit("ENV", "\n".join(f"{k}={fmt(v)}" for k, v in env.items()))
     emit("LM_EVAL_TASKS_TSV", task_tsv(tasks, lm_eval.get("model_args") or {}))
     emit("VLLM_BENCH_TSV", bench_tsv(bench_configs, path))
+    emit("AIPERF_TSV", aiperf_tsv(aiperf_configs, path))
     emit("BFCL_TSV", bfcl_tsv(bfcl) if bfcl else "")
     emit("BENCH_DEVICE", metadata.get("device") or gpu.lower())
     emit("BENCH_TP", tp)
