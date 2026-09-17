@@ -19,7 +19,11 @@ source "$DIR/run_vllm_bench.sh"
 source "$DIR/run_aiperf.sh"
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
-export WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT WORKLOAD_SERVER_RUNTIME
+# Exported so ingest.py and write_run_metadata.py can read the run's context.
+export WORKLOAD_NAME WORKLOAD_MODEL WORKLOAD_IMAGE WORKLOAD_VLLM_COMMIT \
+       WORKLOAD_SERVE_ARGS WORKLOAD_SERVER_RUNTIME WORKLOAD_ENV \
+       WORKLOAD_BENCH_DEVICE WORKLOAD_BENCH_TP WORKLOAD_BENCH_PRECISION \
+       WORKLOAD_VLLM_BENCH_TSV WORKLOAD_LM_EVAL_TASKS_TSV
 echo "image: $WORKLOAD_IMAGE  commit: ${WORKLOAD_VLLM_COMMIT:-unknown}"
 
 PORT="${PERF_EVAL_SERVER_PORT:-$(pick_server_port)}"
@@ -38,6 +42,13 @@ trap 'stop_server "$CONTAINER"' EXIT
 start_server "$CONTAINER" "$PORT" "$WORKLOAD_IMAGE" "$WORKLOAD_MODEL" \
              "$WORKLOAD_SERVE_ARGS" "$WORKLOAD_ENV" "$WORKLOAD_SERVER_RUNTIME"
 wait_healthy "$PORT" "$WORKLOAD_SERVER_STARTUP_TIMEOUT" "$WORKLOAD_MODEL"
+
+# The run record is written once the server is up: by then the image has been
+# pulled and the vLLM version can be read off the server. The result files
+# carry the numbers and the .cmd files the exact commands; this adds the
+# surrounding context so a run can be reproduced from its artifacts alone.
+resolve_image_digest "$WORKLOAD_IMAGE" "$WORKLOAD_SERVER_RUNTIME"
+python3 "$DIR/write_run_metadata.py" "$RESULTS_DIR" || true
 
 # vllm bench serve runs first so we can validate perf flow without waiting
 # on a full lm_eval pass. Each config's raw json lands in
