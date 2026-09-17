@@ -16,9 +16,19 @@ Override env vars are propagated to each step:
                on has its workloads emitted as skipped steps.
   VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
   BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
+  PERF_EVAL_RUN_TYPE
+               build label ("nightly", "pr", "rc", ...) recorded with every
+               result so the dashboard can group like-with-like; defaults to
+               "adhoc". Independent of NIGHTLY.
+  NIGHTLY      when set to 1, drives the nightly behavior and tags rows
+               nightly: true (the dashboard's /nightly view).
 
 Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
 without forcing the whole build to skip lm_eval.
+
+Every step uploads ``results/**/*`` as Buildkite artifacts: scores, raw bench
+JSON, samples, the exact commands, and run_metadata.json. That is the durable
+record of a run.
 
 Writes pipeline YAML to stdout for ``buildkite-agent pipeline upload``.
 """
@@ -357,7 +367,7 @@ def make_step(path, data, profiles):
     step_env = {
         k: os.environ[k]
         for k in ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM",
-                  "VLLM_COMMIT", "BENCH_ONLY")
+                  "VLLM_COMMIT", "BENCH_ONLY", "PERF_EVAL_RUN_TYPE", "NIGHTLY")
         if os.environ.get(k)
     }
     if bench_only and "BENCH_ONLY" not in step_env:

@@ -215,6 +215,9 @@ run_vllm_bench() {
     else
       run_cmd+=(--save-result --result-filename "$run_container_json")
     fi
+    # Record the exact command beside the result; printf %q quotes each word so
+    # the file stays copy-pastable.
+    { printf '%q ' "${run_cmd[@]}"; printf '\n'; } > "${run_host_json%.json}.cmd"
     "${run_cmd[@]}"
 
     if [[ "$runtime" != "native" ]]; then

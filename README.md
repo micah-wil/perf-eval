@@ -150,6 +150,29 @@ python3 .buildkite/test_benchmark_repetitions.py
 
 They require only the standard library and PyYAML; the Buildkite bootstrap runs both before uploading GPU steps.
 
+### Where results go
+
+**Dashboards (live).** `lib/ingest.py` and `lib/ingest_perf.py` POST to the Cloud Run endpoints behind the vLLM eval and perf dashboards. This is best-effort: a failed upload is logged and never aborts a run.
+
+**Buildkite artifacts (durable).** Every step uploads `results/**/*`, and that tree is deliberately complete enough to reconstruct a run:
+
+| Artifact | Contents |
+| --- | --- |
+| `run_metadata.json` | image and **image digest**, vLLM version and commit, serve command, server env vars, device/tp/precision, bench and lm_eval configs, run type, and the Buildkite build/job identifiers |
+| `bench-<name>.json` | raw `vllm bench serve` output, one per config |
+| `bench-<name>.cmd` | the `vllm bench serve` command line, as it ran |
+| `<task>.cmd` | the `lm_eval` command line, as it ran |
+| `<task>/**/results_*.json` | lm_eval scores |
+| `<task>/**/samples_*.jsonl` | per-sample records |
+
+`lib/write_run_metadata.py` writes `run_metadata.json` once the server reports healthy, which is the earliest point the vLLM version is known. Anything it could not capture is recorded as `null` rather than omitted, so a reader can tell "not captured" from "not applicable". Env values whose names look like credentials (`*TOKEN*`, `*SECRET*`, `*PASSWD*`, `*KEY*`) are redacted, since the file is a public artifact.
+
+To repeat what a build ran, download its artifacts and replay `serve_command` and the `.cmd` files, pinning the image by `image_digest` rather than its tag — a tag like `:nightly` moves, a digest does not.
+
+```bash
+bk artifacts download --build 46 --pipeline perf-eval
+```
+
 ### Trigger a Buildkite build
 
 The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). With no extra config, a build runs every workload that has `nightly: true`.
@@ -174,7 +197,8 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
   ROCM: skipped, set VLLM_IMAGE_ROCM (8 workloads)
   ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
-- `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
+- `PERF_EVAL_RUN_TYPE` — label stamped onto every ingested row and into `run_metadata.json` as `run_type` (e.g. `nightly`, `pr`, `rc`, `aiter_nightly`), so the dashboard can group and compare builds of the same kind. Any string works; new categories need no code change. Defaults to `adhoc`. Set it at the pipeline or schedule level so every step gets it. It does **not** trigger the nightly behavior — use `NIGHTLY` for that.
+- `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it. Independent of `PERF_EVAL_RUN_TYPE`.
 
 GPU profiles can set `ecr_pull_through_cache: false` when their cluster pulls
 public ECR images directly. Profiles use the private ECR pull-through cache by

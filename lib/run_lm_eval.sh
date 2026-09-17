@@ -11,10 +11,16 @@
 run_lm_eval() {
   local model=$1 base_url=$2 task=$3 fewshot=$4 model_args=$5 outdir=$6
   echo "--- :microscope: lm_eval ${task} (${fewshot}-shot)"
-  lm_eval --model local-completions \
-    --model_args "model=${model},base_url=${base_url}/v1/completions${model_args:+,$model_args}" \
-    --tasks "$task" \
-    --num_fewshot "$fewshot" \
-    --log_samples \
+  local cmd=(
+    lm_eval --model local-completions
+    --model_args "model=${model},base_url=${base_url}/v1/completions${model_args:+,$model_args}"
+    --tasks "$task"
+    --num_fewshot "$fewshot"
+    --log_samples
     --output_path "${outdir}/${task}"
+  )
+  # Record the exact command beside the results; printf %q quotes each word so
+  # the file stays copy-pastable.
+  { printf '%q ' "${cmd[@]}"; printf '\n'; } > "${outdir}/${task}.cmd"
+  "${cmd[@]}"
 }

@@ -46,6 +46,16 @@ VLLM_ENV_VARS = (
 # Set NIGHTLY=1 in the build env to mark rows as part of the nightly schedule.
 # The dashboard's /nightly view filters on this to pair adjacent nightlies.
 NIGHTLY_ENV = "NIGHTLY"
+# PERF_EVAL_RUN_TYPE labels a build ("nightly", "pr", "rc", ...) so the
+# dashboard can group and compare like-with-like. Any string flows through, so
+# new categories need no code change. Independent of NIGHTLY.
+RUN_TYPE_ENV = "PERF_EVAL_RUN_TYPE"
+DEFAULT_RUN_TYPE = "adhoc"
+
+
+def run_type() -> str:
+    """Resolve this build's run-type label from the environment."""
+    return (os.environ.get(RUN_TYPE_ENV) or "").strip() or DEFAULT_RUN_TYPE
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -77,6 +87,7 @@ def metadata(workload: str, task: str) -> dict:
         v = (os.environ.get(env_key) or "").strip()
         if v:
             md[field] = v
+    md["run_type"] = run_type()
     if os.environ.get(NIGHTLY_ENV) == "1":
         md["nightly"] = True
     return md

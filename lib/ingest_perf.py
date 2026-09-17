@@ -27,6 +27,15 @@ import urllib.request
 DEFAULT_ENDPOINT = "https://vllm-perf-data-ingest-224810116257.us-central1.run.app/"
 AUTH_TOKEN_ENV = "INGEST_BEARER_TOKEN"
 TIMEOUT = 30
+# Build label recorded with every result; see ingest.py. Each lib script reads
+# it independently so none of them import each other.
+RUN_TYPE_ENV = "PERF_EVAL_RUN_TYPE"
+DEFAULT_RUN_TYPE = "adhoc"
+
+
+def run_type() -> str:
+    """Resolve this build's run-type label from the environment."""
+    return (os.environ.get(RUN_TYPE_ENV) or "").strip() or DEFAULT_RUN_TYPE
 
 
 def post(endpoint: str, payload: dict) -> None:
@@ -77,6 +86,7 @@ def transform(raw: dict, args: argparse.Namespace) -> dict:
         "input_tput_per_gpu": input_throughput / tp,
     }
 
+    data["run_type"] = run_type()
     if os.environ.get("NIGHTLY") == "1":
         data["nightly"] = True
 

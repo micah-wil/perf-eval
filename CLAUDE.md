@@ -37,7 +37,8 @@ exec(open('lib/parse_workload.py').read())
 **Shell syntax** — catches typos in the orchestrator and helpers without executing them:
 
 ```bash
-bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh
+bash -n lib/run.sh && bash -n lib/server.sh && bash -n lib/run_lm_eval.sh \
+  && bash -n lib/run_vllm_bench.sh
 ```
 
 **Ingestion auth and pipeline generation:**
@@ -48,6 +49,18 @@ python3 .buildkite/test_generate_pipeline.py
 ```
 
 If you actually need real validation (parser hitting lm-eval's task registry rather than a stub), `pip install 'lm-eval[api]' pyyaml` first. Without it the parser exits with `cannot validate task names: lm_eval not importable` — that's intentional, never silently skip validation.
+
+## Results and artifacts
+
+Steps upload `results/**/*` and nothing else, so anything needed to understand
+or reproduce a run must be written under `results/` before the job ends. That is
+what `lib/write_run_metadata.py` is for: image digest, vLLM version and commit,
+serve command, server env, bench and task configs, run type, and the Buildkite
+identifiers. Put new run context there rather than in a log line.
+
+Ingestion stays best-effort and must never fail a run: every upload catches its
+own errors, and results are still written and uploaded when an endpoint is
+unreachable. Don't turn any of these into `exit 1`.
 
 ## Launching a Buildkite build
 
