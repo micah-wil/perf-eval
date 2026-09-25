@@ -37,10 +37,7 @@ vllm_bench:
       max_concurrency: 128
       speed_bench_dataset_subset: throughput_8k
       speed_bench_category: low_entropy
-
-vllm_bench:
-  configs:
-    - name: 8k-in-1k-out
+    - name: 1k-in-1k-out
       backend: openai
       dataset: random
       input_len: 1024

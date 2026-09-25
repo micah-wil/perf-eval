@@ -4,8 +4,8 @@
 # no H200 profile, the 2.8T model does not fit on Hopper. Requires the
 # dedicated kimi-k3 image; support is not in a stable release yet.
 # Env matches the verified MI355X profile: VLLM_USE_BREAKABLE_CUDAGRAPH=0 is
-# required, and VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 selects the aiter a8w4
-# MoE path on gfx950 (CDNA4).
+# required, and VLLM_ROCM_USE_AITER_MOE_SITUV2=1 selects the aiter MoE path
+# on gfx950 (CDNA4).
 name: kimi_k3-mi355x
 gpu: MI355X
 num_gpus: 8
@@ -18,9 +18,7 @@ vllm:
   env:
     VLLM_ROCM_USE_AITER: 1
     VLLM_USE_BREAKABLE_CUDAGRAPH: 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: 1
-    # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
-    OMP_NUM_THREADS: 1
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: 1
   serve_args: >-
     --tensor-parallel-size 8
     --trust-remote-code
@@ -50,9 +48,6 @@ vllm_bench:
       output_len: 1024
       num_prompts: 512
       max_concurrency: 128
-
-vllm_bench:
-  configs:
     - name: 1k-in-1k-out
       backend: openai
       dataset: random
