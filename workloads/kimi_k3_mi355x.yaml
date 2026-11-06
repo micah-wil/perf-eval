@@ -48,6 +48,8 @@ vllm_bench:
       output_len: 1024
       num_prompts: 512
       max_concurrency: 128
+      args:
+        num_warmups: 2
     - name: 1k-in-1k-out
       backend: openai
       dataset: random
