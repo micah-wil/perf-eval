@@ -1,6 +1,10 @@
+# nsys: true captures an Nsight Systems trace of one profiled `vllm bench serve`
+# pass and uploads it as a Buildkite artifact (NVIDIA only; see lib/nsys.sh).
+
 H200:
   queue: H200
   hf_home: /mnt/shared/hf-models
+  nsys: true
   env:
     # Skip the multi-minute DeepGEMM warmup; kernels are still available
     # if vLLM decides to use them, we just don't precompile every shape.
@@ -8,9 +12,11 @@ H200:
 
 B200:
   queue: b200-k8s
-  hf_home: /mnt/shared/hf_cache
+  # /raid is the B200 nodes' data volume (/mnt/shared there is on the root disk).
+  hf_home: /raid/hf_cache
   server_runtime: native
   k8s_plugin: nvidia
+  nsys: true
   env:
     VLLM_DEEP_GEMM_WARMUP: skip
     NCCL_CUMEM_HOST_ENABLE: 0
@@ -21,6 +27,9 @@ MI300X:
   ecr_pull_through_cache: false
   server_runtime: native
   k8s_plugin: amd
+  # Added to each workload's serve args unless the workload sets the option.
+  default_serve_args:
+    --load-format: fastsafetensors
   env:
     # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
     OMP_NUM_THREADS: 1
@@ -36,6 +45,9 @@ MI355X:
   ecr_pull_through_cache: false
   server_runtime: native
   k8s_plugin: amd
+  # Added to each workload's serve args unless the workload sets the option.
+  default_serve_args:
+    --load-format: fastsafetensors
   env:
     # OMP_NUM_THREADS=1 workaround after weight loading regression from https://github.com/vllm-project/vllm/pull/49919
     OMP_NUM_THREADS: 1

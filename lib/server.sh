@@ -15,9 +15,14 @@
 # on the host is visible to vLLM. For native runtime, values are exported before
 # starting `vllm serve` in the current job container.
 #
+# When NSYS_REPORT is set (see nsys.sh), `vllm serve` is launched through
+# lib/nsys_serve.sh so it runs under Nsight Systems.
+#
 # After start_server, vLLM logs are streamed to stdout (prefixed with `[vllm]`)
 # so build output reflects server startup progress in real time. The streamer's
 # PID is held in $VLLM_LOGS_PID; stop_server kills it.
+
+SERVER_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 pick_server_port() {
   # Native GPU jobs use host networking and multiple jobs can share a node.
@@ -65,6 +70,9 @@ resolve_image_digest() {
 
 start_server() {
   local container=$1 port=$2 image=$3 model=$4 serve_args=$5 env=$6 runtime=${7:-docker}
+  VLLM_SERVER_PID=""
+  VLLM_SERVER_CONTAINER=""
+  VLLM_LOG_FILE=""
   echo "--- :rocket: starting vllm: $model"
 
   # The launch command for the run record. The server env is left out; it is
@@ -93,8 +101,10 @@ start_server() {
     done <<< "$env"
     local log_file="/tmp/${container}.log"
     VLLM_LOG_FILE="$log_file"
+    local launcher=(vllm serve)
+    [[ -n "${NSYS_REPORT:-}" ]] && launcher=(bash "$SERVER_SH_DIR/nsys_serve.sh" "$NSYS_REPORT")
     # shellcheck disable=SC2086  # serve_args intentionally word-split
-    vllm serve "$model" --port "$port" $serve_args >"$log_file" 2>&1 &
+    "${launcher[@]}" "$model" --port "$port" $serve_args >"$log_file" 2>&1 &
     VLLM_SERVER_PID=$!
     echo "--- :memo: streaming vllm logs"
     ( tail -f "$log_file" 2>/dev/null | stdbuf -oL -eL sed 's/^/[vllm] /' ) &
@@ -116,7 +126,15 @@ start_server() {
   fi
 
   # shellcheck disable=SC2086  # serve_args intentionally word-split
-  if [[ "$image" == *"/vllm-ci-test-repo:"* ]]; then
+  if [[ -n "${NSYS_REPORT:-}" ]]; then
+    # The wrapper script is passed inline because the checkout may not be
+    # bind-mountable from the Docker host. No --rm and SIGINT as the stop
+    # signal so nsys_finalize can make nsys write its report and copy it out.
+    docker run -d --name "$container" --stop-signal SIGINT "${docker_args[@]}" \
+      --entrypoint bash "$image" \
+      -c "$(cat "$SERVER_SH_DIR/nsys_serve.sh")" nsys_serve.sh "$NSYS_REPORT" \
+      "$model" --port "$port" $serve_args
+  elif [[ "$image" == *"/vllm-ci-test-repo:"* ]]; then
     docker run -d --rm --name "$container" "${docker_args[@]}" \
       --entrypoint vllm "$image" \
       serve "$model" --port "$port" $serve_args
@@ -127,6 +145,8 @@ start_server() {
       "$image" \
       "$model" --port "$port" $serve_args
   fi
+
+  VLLM_SERVER_CONTAINER="$container"
 
   # Install pytest to avoid cupy.testing import failure during torch.compile
   docker exec "$container" pip install -q pytest 2>/dev/null || true
@@ -171,7 +191,7 @@ record_vllm_version() {
 wait_healthy() {
   local port=$1 timeout=${2:-3600} expected_model=${3:-}
   echo "+++ :hourglass: waiting for /health (timeout ${timeout}s)"
-  local now start deadline next_status elapsed
+  local now start deadline next_status elapsed container_running
   start=$(date +%s)
   deadline=$(( start + timeout ))
   next_status=$(( start + 60 ))
@@ -185,6 +205,16 @@ wait_healthy() {
       echo "vLLM server exited before becoming healthy" >&2
       [[ -n "${VLLM_LOG_FILE:-}" ]] && tail -n 80 "$VLLM_LOG_FILE" >&2 || true
       return 1
+    fi
+    if [[ -n "${VLLM_SERVER_CONTAINER:-}" ]]; then
+      # Docker servers have no local PID. With --rm, a crashed container can
+      # disappear entirely; neither case should consume the readiness timeout.
+      if ! container_running=$(docker inspect --format '{{.State.Running}}' "$VLLM_SERVER_CONTAINER" 2>/dev/null) ||
+          [[ "$container_running" != "true" ]]; then
+        echo "vLLM container $VLLM_SERVER_CONTAINER stopped or became unavailable before becoming healthy" >&2
+        docker logs --tail 80 "$VLLM_SERVER_CONTAINER" >&2 || true
+        return 1
+      fi
     fi
     now=$(date +%s)
     if (( now >= next_status )); then

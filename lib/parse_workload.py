@@ -26,7 +26,7 @@ import sys
 
 import yaml
 
-TASK_FIELDS = {"name", "num_fewshot", "model_args"}
+TASK_FIELDS = {"name", "num_fewshot", "model_args", "chat", "gen_kwargs"}
 BENCH_FIELDS = {
     "name", "backend", "dataset", "input_len", "output_len",
     "num_prompts", "max_concurrency", "repetitions", "args",
@@ -137,6 +137,20 @@ def pins_only_other_platforms(profile: dict) -> bool:
     )
 
 
+def nsys_enabled(profile: dict) -> bool:
+    """Whether to capture an Nsight Systems trace of the server.
+
+    On by default for profiles that set `nsys: true`; NSYS_PROFILE overrides
+    that either way for the whole build. nsys is NVIDIA-only, so ROCm
+    profiles never enable it.
+    """
+    if platform_of(profile) != "CUDA":
+        return False
+    if (os.environ.get("NSYS_PROFILE") or "").strip():
+        return env_truthy("NSYS_PROFILE")
+    return profile.get("nsys") is True
+
+
 def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
     """Pick the image and commit using VLLM_IMAGE / VLLM_COMMIT / workload.
 
@@ -180,6 +194,22 @@ def resolve_image(vllm: dict, profile: dict) -> tuple[str, str]:
 
     image = vllm.get("image", f"{repo}:nightly")
     return image, commit_from_image(str(image))
+
+
+def apply_default_serve_args(serve_args: str, defaults: dict | None) -> str:
+    """Append a profile's default serve args the workload does not already set.
+
+    ``defaults`` maps an option to its value (``True``/``None`` for a bare flag),
+    e.g. ``{"--load-format": "fastsafetensors"}``. A workload overrides a default
+    by passing the option itself.
+    """
+    toks = serve_args.split()
+    extra = []
+    for opt, val in (defaults or {}).items():
+        if any(t == opt or t.startswith(opt + "=") for t in toks):
+            continue
+        extra.append(opt if val is True or val is None else f"{opt} {val}")
+    return " ".join([serve_args.strip(), *extra]).strip()
 
 
 def parse_tp(serve_args: str) -> int:
@@ -231,16 +261,24 @@ def validate_tasks(tasks: list, path: str) -> None:
                 f"{path}: task {t['name']!r} has unsupported top-level fields "
                 f"{sorted(extra)}; move them under `model_args:`"
             )
+        if not isinstance(t.get("chat", False), bool):
+            sys.exit(f"{path}: task {t['name']!r} chat must be true or false")
+        if not isinstance(t.get("gen_kwargs", {}), dict):
+            sys.exit(f"{path}: task {t['name']!r} gen_kwargs must be a map")
         if not skip_registry and t["name"] not in known:
             sys.exit(f"{path}: unknown lm_eval task {t['name']!r}")
 
 
 def task_tsv(tasks: list, base_args: dict) -> str:
+    """One row per task; '-' marks an empty column (bash read collapses empty tab fields)."""
     lines = []
     for t in tasks:
         merged = {**base_args, **(t.get("model_args") or {})}
-        args = ",".join(f"{k}={fmt(v)}" for k, v in merged.items())
-        lines.append(f"{t['name']}\t{t.get('num_fewshot', 0)}\t{args}")
+        args = ",".join(f"{k}={fmt(v)}" for k, v in merged.items()) or "-"
+        api = "chat" if t.get("chat") else "completions"
+        # lm-eval parses JSON --gen_kwargs, so values keep their YAML types.
+        gen_kwargs = json.dumps(t["gen_kwargs"]) if t.get("gen_kwargs") else "-"
+        lines.append(f"{t['name']}\t{t.get('num_fewshot', 0)}\t{api}\t{args}\t{gen_kwargs}")
     return "\n".join(lines)
 
 
@@ -536,6 +574,7 @@ def main(path: str) -> None:
     if bfcl:
         validate_bfcl(bfcl, serve_args, path)
 
+    serve_args = apply_default_serve_args(serve_args, profile.get("default_serve_args"))
     image, vllm_commit = resolve_image(vllm, profile)
     env = {**(profile.get("env") or {}), **(vllm.get("env") or {})}
     if "HF_HOME" not in env and profile.get("hf_home"):
@@ -553,6 +592,7 @@ def main(path: str) -> None:
     emit("SERVE_ARGS", serve_args)
     emit("SERVER_STARTUP_TIMEOUT", startup_timeout_s)
     emit("SERVER_RUNTIME", profile.get("server_runtime", "docker"))
+    emit("NSYS", "true" if nsys_enabled(profile) else "false")
     emit("ENV", "\n".join(f"{k}={fmt(v)}" for k, v in env.items()))
     emit("LM_EVAL_TASKS_TSV", task_tsv(tasks, lm_eval.get("model_args") or {}))
     emit("VLLM_BENCH_TSV", bench_tsv(bench_configs, path))

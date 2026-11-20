@@ -56,6 +56,9 @@ BENCH_TSV_FIELDS = ("name", "backend", "dataset", "isl", "osl", "num_prompts",
                     "speed_bench_category", "args")
 BENCH_INT_FIELDS = ("isl", "osl", "num_prompts", "conc", "repetitions")
 
+# The lm_eval task TSV columns parse_workload.py emits, in order.
+TASK_TSV_FIELDS = ("name", "num_fewshot", "api", "model_args", "gen_kwargs")
+
 # The server env is merged from the GPU profile and the recipe, and this file is
 # uploaded as a public artifact.
 SECRET_MARKERS = ("TOKEN", "SECRET", "PASSWD", "PASSWORD", "KEY", "CREDENTIAL")
@@ -121,9 +124,16 @@ def parse_task_tsv(raw):
         if not line.strip():
             continue
         cells = line.split("\t")
-        out.append({"name": cells[0],
-                    "num_fewshot": cells[1] if len(cells) > 1 else None,
-                    "model_args": cells[2] if len(cells) > 2 else None})
+        task = {}
+        for i, field in enumerate(TASK_TSV_FIELDS):
+            value = cells[i] if i < len(cells) else ""
+            task[field] = None if value in ("", "-") else value
+        if task["gen_kwargs"]:
+            try:
+                task["gen_kwargs"] = json.loads(task["gen_kwargs"])
+            except (ValueError, TypeError):
+                task["gen_kwargs"] = None
+        out.append(task)
     return out
 
 

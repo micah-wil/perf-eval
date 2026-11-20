@@ -67,6 +67,10 @@ lm_eval:                 # accuracy tasks (optional)
         max_length: 40960
     - name: aime25
       num_fewshot: 0
+      chat: true                      # /v1/chat/completions + chat template (default: /v1/completions)
+      gen_kwargs:                     # optional; merged over the task's generation_kwargs (lm_eval --gen_kwargs)
+        top_p: 0.95
+        reasoning_effort: high        # unknown keys go straight into the request body
 
 bfcl:                    # function-calling eval (optional)
   test_categories:       # BFCL test categories to run
@@ -112,6 +116,7 @@ A few things worth knowing:
 - **`vllm.image` is normally just a fallback.** The `VLLM_IMAGE` / `VLLM_COMMIT` build-time env vars override it, which is what you want for nightly perf tracking across a specific vLLM commit. Set **`pin_image: true`** only as a rare escape hatch for a model that genuinely cannot be served by the nightly under test (e.g. support landed in a dedicated image but not yet in nightly) — it makes the workload keep its own `image` regardless of the override. Do not pin models that current nightlies already serve.
 - **`nightly`** controls only the nightly schedule. Recipes with `nightly: false` (or omitted) are still triggerable explicitly via the `WORKLOADS` env var.
 - **`timeout_in_minutes`** overrides the Buildkite step timeout (default: `120`). This is separate from `lm_eval.model_args.timeout`, which controls individual API requests.
+- **`vllm.startup_timeout_s`** limits the readiness wait (default: `3600`). The wait ends early if the native server process exits or the Docker container stops or disappears. Server lifecycle regression tests run in the CPU pipeline-generation step.
 - **`lm_eval.tasks` is a list** because each entry runs as a separate `lm_eval` invocation — `--num_fewshot` is a single global flag, so different shot counts need separate runs. Each task's results land in `results/<name>/<task-name>/`.
 - **`vllm_bench` runs first** if both blocks are present — that way perf-pipeline bugs surface quickly instead of waiting on a full lm-eval pass.
 - **`vllm_bench` uses the `random` dataset with `--ignore-eos`** so every request prefills exactly `input_len` and decodes exactly `output_len` tokens — that's what makes the per-GPU decode throughput meaningful. Pair it with `backend: openai` (the `/v1/completions` endpoint) for exact token control. Avoid `dataset: speed_bench` for throughput numbers: it requires `--skip-tokenizer-init`, which makes `vllm bench serve` cap every request at a single output token, so output throughput reads as ~0.
@@ -138,6 +143,8 @@ A cluster with fast shared storage can keep a warm, cross-run cache by overridin
   ```
 
 - **Per-profile:** set `hf_cache_volume:` in the profile in `lib/gpu_profiles.yaml` (env override wins over this).
+
+The B200 profile is the exception: its pods mount the node's `/raid` data volume and keep the cache at `hf_home: /raid/hf_cache`, the same cache vLLM CI's B200 jobs use, so weights stay warm across runs. `/mnt/shared` is not a mount on the B200 nodes and is not mounted into the pod.
 
 Do **not** set an `hf_home` under a node path like `/mnt/shared` unless that path is a real mount on every node in the queue — with the default `emptyDir` that only changes the in-pod path, but if you also point the volume at a `hostPath`, an unmounted path lands the cache on the node root disk with no reclamation.
 
@@ -197,6 +204,7 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
   ROCM: skipped, set VLLM_IMAGE_ROCM (8 workloads)
   ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
+- `NSYS_PROFILE` — `0` to skip Nsight Systems tracing for this build, `1` to force it on for every NVIDIA workload. Unset follows the GPU profile's `nsys:` (see [Nsight Systems traces](#nsight-systems-traces)). `NSYS_MAX_ITERATIONS` (default `100`, `0` = until the run ends) and `NSYS_DELAY_ITERATIONS` (default `0`) set which engine iterations get recorded.
 - `PERF_EVAL_RUN_TYPE` — label stamped onto every ingested row and into `run_metadata.json` as `run_type` (e.g. `nightly`, `pr`, `rc`, `aiter_nightly`), so the dashboard can group and compare builds of the same kind. Any string works; new categories need no code change. Defaults to `adhoc`. Set it at the pipeline or schedule level so every step gets it. It does **not** trigger the nightly behavior — use `NIGHTLY` for that.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it. Independent of `PERF_EVAL_RUN_TYPE`.
 
@@ -225,6 +233,16 @@ This runs the `qwen3_5_h200` workload against the specified vLLM nightly image. 
 
 **From an agent:** see `CLAUDE.md` for the Buildkite MCP and authenticated
 `bk` workflows. Don't make raw Buildkite API calls with `curl`.
+
+### Nsight Systems traces
+
+NVIDIA workloads (GPU profiles with `nsys: true` in `lib/gpu_profiles.yaml`, currently H200 and B200) upload an Nsight Systems trace of the server as a Buildkite artifact: `results/<name>/nsys/<name>-<bench config>.nsys-rep`. Open it in the Nsight Systems GUI or summarize it with `nsys stats <file>`.
+
+How it's captured (`lib/nsys.sh`, `lib/nsys_serve.sh`):
+
+- `vllm serve` runs under `nsys profile --capture-range=cudaProfilerApi`, with `--profiler-config.profiler cuda` and `VLLM_WORKER_MULTIPROC_METHOD=spawn`. nsys is installed into the server container/pod from the CUDA apt repo at startup (~450 MB, the vLLM images don't ship it). If that fails the server starts unprofiled and the workload carries on.
+- Nothing is recorded during the measured `vllm_bench` runs. After them, one extra `vllm bench serve --profile` pass reuses the first `vllm_bench` config at one wave (`num_prompts` = `max_concurrency`, 1 repetition, not ingested) and records `NSYS_MAX_ITERATIONS` engine iterations. A workload with no `vllm_bench` configs isn't traced.
+- A failed profiling pass logs a warning instead of failing the step.
 
 ### Run a recipe end-to-end
 

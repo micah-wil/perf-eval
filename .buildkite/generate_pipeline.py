@@ -16,6 +16,9 @@ Override env vars are propagated to each step:
                on has its workloads emitted as skipped steps.
   VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
   BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
+  NSYS_PROFILE truthy/falsy forces nsys tracing on/off for NVIDIA workloads
+               (default: the GPU profile's `nsys`); NSYS_MAX_ITERATIONS and
+               NSYS_DELAY_ITERATIONS tune the traced window
   PERF_EVAL_RUN_TYPE
                build label ("nightly", "pr", "rc", ...) recorded with every
                result so the dashboard can group like-with-like; defaults to
@@ -169,6 +172,7 @@ def resolved_image(data, profile):
 
 
 def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
+    hf_home = profile["hf_home"]  # set per profile in lib/gpu_profiles.yaml
     return {
         "kubernetes": {
             "podSpec": {
@@ -190,12 +194,11 @@ def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                         "volumeMounts": [
                             {"name": "devshm", "mountPath": "/dev/shm"},
                             {"name": "raid", "mountPath": "/raid"},
-                            {"name": "shared", "mountPath": "/mnt/shared"},
                         ],
                         "env": [
                             {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
                             {"name": "NCCL_CUMEM_HOST_ENABLE", "value": "0"},
-                            {"name": "HF_HOME", "value": "/mnt/shared/hf_cache"},
+                            {"name": "HF_HOME", "value": hf_home},
                             {
                                 "name": "HF_TOKEN",
                                 "valueFrom": {
@@ -213,10 +216,6 @@ def b200_k8s_plugin(image, num_gpus, profile=None, gpu=None):
                     {
                         "name": "raid",
                         "hostPath": {"path": "/raid", "type": "DirectoryOrCreate"},
-                    },
-                    {
-                        "name": "shared",
-                        "hostPath": {"path": "/mnt/shared", "type": "DirectoryOrCreate"},
                     },
                 ],
             },
@@ -333,7 +332,9 @@ def make_step(path, data, profiles):
     if bench_only:
         setup_commands = BENCH_ONLY_SETUP_COMMANDS
     elif has_bfcl:
-        setup_commands = [setup_command("'lm-eval[api]' pyyaml bfcl-eval soundfile")]
+        # bfcl-eval pins numpy==1.26.4, and pyarrow 26 needs numpy>=2, so
+        # lm_eval cannot be imported. datasets needs pyarrow>=24.
+        setup_commands = [setup_command("'lm-eval[api]' pyyaml bfcl-eval soundfile 'pyarrow>=24,<26'")]
     else:
         setup_commands = FULL_SETUP_COMMANDS
     step = {
@@ -342,6 +343,7 @@ def make_step(path, data, profiles):
         "timeout_in_minutes": timeout,
         "commands": setup_commands + [RUN_TEMPLATE.format(path=path)],
         "artifact_paths": ["results/**/*"],
+        "retry": data.get("retry", {"automatic": {"limit": 2}}),
     }
     image = resolved_image(data, profile)
     if not image:
@@ -367,7 +369,9 @@ def make_step(path, data, profiles):
     step_env = {
         k: os.environ[k]
         for k in ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM",
-                  "VLLM_COMMIT", "BENCH_ONLY", "PERF_EVAL_RUN_TYPE", "NIGHTLY")
+                  "VLLM_COMMIT", "BENCH_ONLY", "NSYS_PROFILE",
+                  "NSYS_MAX_ITERATIONS", "NSYS_DELAY_ITERATIONS",
+                  "PERF_EVAL_RUN_TYPE", "NIGHTLY")
         if os.environ.get(k)
     }
     if bench_only and "BENCH_ONLY" not in step_env:
