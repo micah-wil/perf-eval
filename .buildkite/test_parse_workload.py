@@ -22,7 +22,7 @@ def build_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def write_workload(tmp_path: Path, startup_timeout_s: object) -> Path:
+def write_workload(tmp_path: Path, startup_timeout_s: object = 3600, **extra) -> Path:
     (tmp_path / "lib").mkdir()
     (tmp_path / "workloads").mkdir()
     (tmp_path / "lib" / "gpu_profiles.yaml").write_text(yaml.safe_dump({"H200": {}}))
@@ -30,11 +30,13 @@ def write_workload(tmp_path: Path, startup_timeout_s: object) -> Path:
     workload.write_text(
         yaml.safe_dump(
             {
+                **extra,
                 "name": "test",
                 "gpu": "H200",
                 "vllm": {
                     "model": "test/model",
                     "startup_timeout_s": startup_timeout_s,
+                    "serve_args": "--tensor-parallel-size 8",
                 },
                 "vllm_bench": {
                     "configs": [
@@ -118,3 +120,38 @@ def test_default_serve_args_apply_unless_the_workload_sets_them(
     serve_args, defaults, expected
 ):
     assert parse_workload.apply_default_serve_args(serve_args, defaults) == expected
+
+
+KVV = {
+    "serve_args": "--reasoning-parser kimi_k3",
+    "jobs": ["verify_k3_features", "ocrbench_thinking_effort:max"],
+}
+
+
+@pytest.mark.parametrize(("env", "enabled"), [(None, False), ("0", False), ("1", True)])
+def test_kvv_runs_only_when_the_build_opts_in(tmp_path, capsys, monkeypatch, env, enabled):
+    if env is None:
+        monkeypatch.delenv("RUN_KVV", raising=False)
+    else:
+        monkeypatch.setenv("RUN_KVV", env)
+
+    parse_workload.main(str(write_workload(tmp_path, kvv=KVV)))
+    out = capsys.readouterr().out
+
+    if enabled:
+        assert "WORKLOAD_KVV_JOBS='verify_k3_features ocrbench_thinking_effort:max'" in out
+        assert "WORKLOAD_SERVE_ARGS='--tensor-parallel-size 8 --reasoning-parser kimi_k3'" in out
+    else:
+        assert "WORKLOAD_KVV_JOBS=''" in out
+        assert "WORKLOAD_SERVE_ARGS='--tensor-parallel-size 8'" in out
+
+
+@pytest.mark.parametrize(
+    "kvv",
+    [{"jobs": []}, {"jobs": ["a b"]}, {"jobs": ["a"], "bogus": 1},
+     {"jobs": ["a"], "extra_timeout_in_minutes": -1}],
+)
+def test_rejects_invalid_kvv_block(tmp_path, monkeypatch, kvv):
+    monkeypatch.delenv("RUN_KVV", raising=False)
+    with pytest.raises(SystemExit, match="kvv"):
+        parse_workload.main(str(write_workload(tmp_path, kvv=kvv)))

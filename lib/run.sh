@@ -18,6 +18,8 @@ source "$DIR/run_vllm_bench.sh"
 # shellcheck disable=SC1091
 source "$DIR/run_aiperf.sh"
 # shellcheck disable=SC1091
+source "$DIR/run_kvv.sh"
+# shellcheck disable=SC1091
 source "$DIR/nsys.sh"
 WORKLOAD_EXPORTS="$(python3 "$DIR/parse_workload.py" "$WORKLOAD")"
 eval "$WORKLOAD_EXPORTS"
@@ -130,3 +132,9 @@ while IFS=$'\t' read -r category num_threads temperature maximum_step_limit max_
       ${INGEST_NO_SAMPLES:+--no-samples} || true
   fi
 done <<< "$WORKLOAD_BFCL_TSV"
+
+# Kimi Vendor Verifier; empty unless the build sets RUN_KVV and the workload
+# has a `kvv` block.
+if [[ -n "$WORKLOAD_KVV_JOBS" ]]; then
+  run_kvv "$WORKLOAD_MODEL" "$BASE_URL" "$WORKLOAD_KVV_JOBS" "$RESULTS_DIR"
+fi

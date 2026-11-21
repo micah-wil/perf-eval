@@ -336,6 +336,28 @@ def test_step_retry_is_configurable_per_workload():
     assert step["retry"] == {"automatic": {"limit": 3}}
 
 
+def test_kvv_extends_timeout_and_reaches_the_step_only_when_enabled():
+    """RUN_KVV makes the job run KVV, so it needs the extra time and the flag."""
+    data = {"name": "t", "gpu": "MI355X",
+            "kvv": {"jobs": ["verify_k3_features"], "extra_timeout_in_minutes": 240}}
+    saved = os.environ.pop("RUN_KVV", None)
+    try:
+        off = g.make_step("workloads/t.yaml", data, g.load_profiles())
+        os.environ["RUN_KVV"] = "1"
+        on = g.make_step("workloads/t.yaml", data, g.load_profiles())
+        no_block = g.make_step("workloads/t.yaml", {"name": "t", "gpu": "MI355X"},
+                               g.load_profiles())
+    finally:
+        os.environ.pop("RUN_KVV", None)
+        if saved is not None:
+            os.environ["RUN_KVV"] = saved
+    assert off["timeout_in_minutes"] == g.DEFAULT_TIMEOUT
+    assert "RUN_KVV" not in off.get("env", {})
+    assert on["timeout_in_minutes"] == g.DEFAULT_TIMEOUT + 240
+    assert on["env"]["RUN_KVV"] == "1"
+    assert no_block["timeout_in_minutes"] == g.DEFAULT_TIMEOUT
+
+
 def test_step_retry_can_be_disabled():
     """A workload can disable retry entirely by setting it to None or False."""
     step = g.make_step(

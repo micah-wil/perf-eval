@@ -32,6 +32,17 @@ lm_eval:
         max_length: 32768
         max_gen_toks: 8192
 
+# Kimi Vendor Verifier (https://github.com/MoonshotAI/Kimi-Vendor-Verifier).
+# Only runs when the build sets RUN_KVV=1.
+kvv:
+  extra_timeout_in_minutes: 240
+  jobs:
+    - verify_toolcall_result_reject
+    - verify_prompt_tokens
+    - verify_k3_features
+    - ocrbench_thinking_effort:max
+    - toolcall_thinking_effort:max
+
 vllm_bench:
   metadata:
     # The default K3.1 checkpoint is MXFP4; the repo name has no precision marker.

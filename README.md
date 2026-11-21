@@ -35,6 +35,8 @@ A recipe has top-level metadata plus up to four eval blocks:
 - **`aiperf:`** — *what perf to measure with [aiperf](https://pypi.org/project/aiperf/).* Lists `aiperf profile` configs for scenarios `vllm bench serve` doesn't cover (e.g. prefix-cache sweeps, server-side token counting). aiperf is pip-installed at run time because the vLLM images don't ship it. Artifacts are saved under `results/<name>/aiperf-<config>/` and uploaded as Buildkite artifacts; there is no dashboard ingest yet. Optional.
 - **`bfcl:`** — *function-calling eval.* Runs [BFCL](https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard) test categories against the live server. Some models need `--enable-auto-tool-choice` and `--tool-call-parser` in `serve_args`. Results are transformed to lm_eval format and ingested as `bfcl_<category>` tasks. Optional.
 
+- **`kvv:`** — *Kimi vendor verification.* Lists [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) jobs to run against the live server. Off unless the build sets `RUN_KVV=1`. Optional; see the note below.
+
 Include one or more of `lm_eval:` / `vllm_bench:` / `aiperf:` / `bfcl:` depending on what you want out of this recipe.
 
 ```yaml
@@ -108,6 +110,13 @@ aiperf:                 # perf runs via the aiperf CLI (optional)
         extra-inputs:                   # a list repeats the flag
           - "ignore_eos:true"           # --extra-inputs ignore_eos:true
           - "max_tokens:350"
+
+kvv:                     # Kimi Vendor Verifier (optional; only runs when RUN_KVV=1)
+  serve_args: --reasoning-parser kimi_k3  # optional; appended to vllm.serve_args only when KVV runs
+  extra_timeout_in_minutes: 240           # optional; added to the step timeout only when KVV runs
+  jobs:                                   # KVV run_eval.sh job names
+    - verify_k3_features
+    - ocrbench_thinking_effort:max
 ```
 
 A few things worth knowing:
@@ -127,6 +136,8 @@ A few things worth knowing:
 - **`bfcl` may need tool-call serve args.** Some models require `--enable-auto-tool-choice` and `--tool-call-parser` for function-calling; the parser warns if `--tool-call-parser` is absent. Each category runs as a separate generate + evaluate pass; scores appear on the eval dashboard as `bfcl_<category>` tasks.
 - **`bfcl.maximum_step_limit`** caps how many inference steps BFCL allows per multi-turn turn (default 10 in perf-eval; BFCL upstream defaults to 20). Set it in the workload YAML, or override per-run with the `BFCL_MAXIMUM_STEP_LIMIT` env var (env wins over YAML). Useful for agentic / long multi-turn categories.
 - **`bfcl.max_test_cases`** subsamples a category instead of running the full set — e.g. `multi_turn` (~800 cases) down to 300. For aggregate groups with multiple subcategories, the cap is split evenly across subcategories (by BFCL id order within each). Set a single integer to cap every category, or a map per category (`multi_turn: 240`). Override per-run with `BFCL_MAX_TEST_CASES`. Scores are partial-eval only and are not comparable to full BFCL leaderboard numbers.
+
+- **`kvv` is opt-in per build.** A workload's `kvv` block does nothing unless the build sets `RUN_KVV=1`; then the jobs run after every other block (so `BENCH_ONLY` skips them too). `lib/run_kvv.sh` clones KVV at a pinned commit (`KVV_REF`) into `.kvv/`, lets KVV build its own env with `uv`, and runs each job through KVV's `run_eval.sh` with `THINK_MODE=opensource` against `<server>/v1`. Logs, pytest reports, and inspect-ai `.eval` logs land in `results/<name>/kvv/`; there is no dashboard ingest. A failed KVV job is logged and never fails the workload. KVV's `verify_parameters` and `verify_tool_call_json_schema` check Kimi-platform behavior that vLLM doesn't implement, so the shipped workloads leave them out.
 
 For everything else (the full set of supported fields, defaults, validation rules), the existing files in `workloads/` are the working reference and `lib/parse_workload.py` is the source of truth.
 
@@ -182,6 +193,7 @@ The pipeline is [**`vllm/perf-eval`**](https://buildkite.com/vllm/perf-eval). Wi
   ```
 - `WORKLOADS` — comma- or newline-separated list of workload paths or stems. Runs exactly those instead of the default `nightly: true` set.
 - `NSYS_PROFILE` — `0` to skip Nsight Systems tracing for this build, `1` to force it on for every NVIDIA workload. Unset follows the GPU profile's `nsys:` (see [Nsight Systems traces](#nsight-systems-traces)). `NSYS_MAX_ITERATIONS` (default `100`, `0` = until the run ends) and `NSYS_DELAY_ITERATIONS` (default `0`) set which engine iterations get recorded.
+- `RUN_KVV` — set to `1` to also run the Kimi Vendor Verifier jobs of workloads that have a `kvv` block (currently `kimi_k3_mi355x` and `kimi_k3_1_pro_mi355x`). Workloads without one are unaffected.
 - `NIGHTLY` — set to `1` to tag every ingested row with `nightly: true`. The dashboard's `/nightly` view filters on this to pair adjacent nightly builds; only the scheduled nightly cron should set it.
 
 GPU profiles can set `ecr_pull_through_cache: false` when their cluster pulls

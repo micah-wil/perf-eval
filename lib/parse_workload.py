@@ -12,7 +12,8 @@ workload's GPU) > VLLM_IMAGE > VLLM_COMMIT > workload `vllm.image` >
 `vllm/vllm-openai:latest`. A build that pins images per platform but not this
 workload's, and sets no VLLM_IMAGE, has nothing to run here and is an error.
 When BENCH_ONLY is truthy, lm_eval task names are not validated against the
-registry (because they will not run).
+registry (because they will not run). A workload's `kvv` block is inert unless
+RUN_KVV is truthy, which appends `kvv.serve_args` and emits `kvv.jobs`.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ BFCL_FIELDS = {
     "test_categories", "num_threads", "temperature",
     "maximum_step_limit", "max_test_cases",
 }
+KVV_FIELDS = {"jobs", "serve_args", "extra_timeout_in_minutes"}
 BFCL_DEFAULT_MAXIMUM_STEP_LIMIT = 10
 BFCL_KNOWN_CATEGORIES = {
     "simple_python", "simple_java", "simple_javascript",
@@ -502,6 +504,22 @@ def validate_bfcl(bfcl: dict, serve_args: str, path: str) -> None:
     _validate_bfcl_limits(bfcl, path)
 
 
+def validate_kvv(kvv: dict, path: str) -> None:
+    extra = set(kvv) - KVV_FIELDS
+    if extra:
+        sys.exit(f"{path}: kvv block has unsupported fields {sorted(extra)}")
+    jobs = kvv.get("jobs")
+    if not isinstance(jobs, list) or not jobs or not all(
+        isinstance(j, str) and j and not any(c.isspace() for c in j) for j in jobs
+    ):
+        sys.exit(f"{path}: kvv.jobs must be a non-empty list of KVV run_eval.sh job names")
+    if not isinstance(kvv.get("serve_args", ""), str):
+        sys.exit(f"{path}: kvv.serve_args must be a string")
+    minutes = kvv.get("extra_timeout_in_minutes", 0)
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < 0:
+        sys.exit(f"{path}: kvv.extra_timeout_in_minutes must be a non-negative integer")
+
+
 def max_test_cases_for_category(bfcl: dict, category: str) -> int | None:
     cases = bfcl.get("max_test_cases")
     if isinstance(cases, int):
@@ -548,6 +566,7 @@ def main(path: str) -> None:
     bench = data.get("vllm_bench") or {}
 
     aiperf = data.get("aiperf") or {}
+    kvv = data.get("kvv") or {}
 
     tasks = lm_eval.get("tasks") or []
     bfcl = data.get("bfcl") or {}
@@ -573,6 +592,11 @@ def main(path: str) -> None:
         sys.exit(f"{path}: vllm.startup_timeout_s must be a positive integer")
     if bfcl:
         validate_bfcl(bfcl, serve_args, path)
+    if kvv:
+        validate_kvv(kvv, path)
+    run_kvv = bool(kvv) and env_truthy("RUN_KVV")
+    if run_kvv:
+        serve_args = f"{serve_args} {kvv.get('serve_args') or ''}".strip()
 
     serve_args = apply_default_serve_args(serve_args, profile.get("default_serve_args"))
     image, vllm_commit = resolve_image(vllm, profile)
@@ -598,6 +622,7 @@ def main(path: str) -> None:
     emit("VLLM_BENCH_TSV", bench_tsv(bench_configs, path))
     emit("AIPERF_TSV", aiperf_tsv(aiperf_configs, path))
     emit("BFCL_TSV", bfcl_tsv(bfcl) if bfcl else "")
+    emit("KVV_JOBS", " ".join(kvv["jobs"]) if run_kvv else "")
     emit("BENCH_DEVICE", metadata.get("device") or gpu.lower())
     emit("BENCH_TP", tp)
     emit(

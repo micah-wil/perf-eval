@@ -37,6 +37,23 @@ lm_eval:
         max_length: 40960
         max_gen_toks: 32768
 
+# Kimi Vendor Verifier (https://github.com/MoonshotAI/Kimi-Vendor-Verifier).
+# Only runs when the build sets RUN_KVV=1.
+kvv:
+  # The recipe's tool-call and reasoning parsers, which KVV's tool-call and
+  # thinking-effort checks need. Added to serve_args only when KVV runs.
+  serve_args: >-
+    --enable-auto-tool-choice
+    --tool-call-parser kimi_k3
+    --reasoning-parser kimi_k3
+  extra_timeout_in_minutes: 240
+  jobs:
+    - verify_toolcall_result_reject
+    - verify_prompt_tokens
+    - verify_k3_features
+    - ocrbench_thinking_effort:max
+    - toolcall_thinking_effort:max
+
 vllm_bench:
   metadata:
     # The default K3 checkpoint is MXFP4; the repo name has no precision marker.

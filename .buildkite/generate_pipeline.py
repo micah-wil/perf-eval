@@ -19,6 +19,8 @@ Override env vars are propagated to each step:
   NSYS_PROFILE truthy/falsy forces nsys tracing on/off for NVIDIA workloads
                (default: the GPU profile's `nsys`); NSYS_MAX_ITERATIONS and
                NSYS_DELAY_ITERATIONS tune the traced window
+  RUN_KVV      when truthy, also run the Kimi Vendor Verifier jobs of
+               workloads with a `kvv` block, adding its extra_timeout_in_minutes
 
 Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
 without forcing the whole build to skip lm_eval.
@@ -318,6 +320,9 @@ def make_step(path, data, profiles):
     bench_only = is_truthy(os.environ.get("BENCH_ONLY")) or is_truthy(
         data.get("bench_only")
     )
+    kvv = data.get("kvv") or {}
+    if kvv and is_truthy(os.environ.get("RUN_KVV")) and not bench_only:
+        timeout += kvv.get("extra_timeout_in_minutes", 0)
     has_bfcl = bool(data.get("bfcl"))
     if bench_only:
         setup_commands = BENCH_ONLY_SETUP_COMMANDS
@@ -360,7 +365,7 @@ def make_step(path, data, profiles):
         k: os.environ[k]
         for k in ("VLLM_IMAGE", "VLLM_IMAGE_CUDA", "VLLM_IMAGE_ROCM",
                   "VLLM_COMMIT", "BENCH_ONLY", "NSYS_PROFILE",
-                  "NSYS_MAX_ITERATIONS", "NSYS_DELAY_ITERATIONS")
+                  "NSYS_MAX_ITERATIONS", "NSYS_DELAY_ITERATIONS", "RUN_KVV")
         if os.environ.get(k)
     }
     if bench_only and "BENCH_ONLY" not in step_env:
