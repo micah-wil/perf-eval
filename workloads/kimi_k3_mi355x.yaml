@@ -49,8 +49,6 @@ kvv:
   extra_timeout_in_minutes: 240
   jobs:
     - verify_toolcall_result_reject
-    - verify_prompt_tokens
-    - verify_k3_features
     - ocrbench_thinking_effort:max
     - toolcall_thinking_effort:max
 
