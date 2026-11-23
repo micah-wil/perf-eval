@@ -6,23 +6,32 @@
 #   run_aiperf <container> <port> <model> <name> <args_base64> <output_dir>
 #
 # aiperf is a client-side load generator that is not shipped in the
-# vllm/vllm-openai images, so it is pip-installed on first use. Native runtime
-# installs it into the job's Python; Docker runtime installs and runs it inside
-# the vLLM container. Artifacts land in "<output_dir>/aiperf-<name>/" and are
-# picked up by the Buildkite artifact upload.
+# vllm/vllm-openai images, so it is installed on first use as a uv tool on its
+# own Python: aiperf requires Python <3.14 since 0.8, and on the 3.14 images a
+# plain pip install silently falls back to 0.7, which lacks options such as
+# --sweep-type. Native runtime installs it next to the job; Docker runtime
+# installs and runs it inside the vLLM container. Artifacts land in
+# "<output_dir>/aiperf-<name>/" and are picked up by the Buildkite artifact
+# upload.
+
+AIPERF_SPEC="aiperf>=0.12"
+AIPERF_PYTHON=3.13
 
 ensure_aiperf() {
   local runtime=$1 container=$2
   if [[ "$runtime" == "native" ]]; then
     command -v aiperf >/dev/null 2>&1 && return 0
     echo "--- :package: installing aiperf"
-    pip_install_quiet aiperf
+    pip_install_quiet uv
+    python3 -m uv tool install --quiet --python "$AIPERF_PYTHON" "$AIPERF_SPEC"
+    PATH="$(python3 -m uv tool dir --bin):$PATH"
   else
     docker exec "$container" bash -lc 'command -v aiperf >/dev/null 2>&1' && return 0
     echo "--- :package: installing aiperf in vLLM container"
     docker exec "$container" bash -lc \
-      'PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --quiet aiperf \
-        || PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --user --quiet aiperf'
+      "PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --quiet uv \
+        && UV_TOOL_BIN_DIR=/usr/local/bin python3 -m uv tool install --quiet \
+             --python $AIPERF_PYTHON '$AIPERF_SPEC'"
   fi
 }
 
