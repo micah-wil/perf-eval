@@ -1,0 +1,15 @@
+# Throwaway: runs lib/probe_docker.sh in an MI355X pod instead of a workload.
+name: probe-docker-mi355x
+gpu: MI355X
+num_gpus: 1
+nightly: false
+timeout_in_minutes: 30
+retry:
+  automatic: false
+
+vllm:
+  model: Qwen/Qwen3-0.6B
+
+lm_eval:
+  tasks:
+    - name: gsm8k

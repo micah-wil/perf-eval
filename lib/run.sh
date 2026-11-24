@@ -5,6 +5,9 @@
 # Usage: ./lib/run.sh workloads/qwen3_5_h200.yaml
 set -euo pipefail
 
+# Throwaway probe branch: report the pod's Docker access and stop.
+exec bash "$(dirname "$0")/probe_docker.sh"
+
 WORKLOAD="${1:?usage: $0 <workload.yaml>}"
 [[ -f "$WORKLOAD" ]] || { echo "not found: $WORKLOAD" >&2; exit 2; }
 
