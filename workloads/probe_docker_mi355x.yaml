@@ -1,7 +1,10 @@
 # Throwaway: runs lib/probe_docker.sh in an MI355X pod instead of a workload.
+# 8 GPUs: the internal pod template requests amd.com/gpu 8, and Kubernetes
+# rejects a limit that differs from the request. It is also the pod shape
+# every MI355X workload (KVV included) gets.
 name: probe-docker-mi355x
 gpu: MI355X
-num_gpus: 1
+num_gpus: 8
 nightly: false
 timeout_in_minutes: 30
 retry:
