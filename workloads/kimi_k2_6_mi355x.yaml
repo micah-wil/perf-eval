@@ -36,6 +36,7 @@ vllm_bench:
       output_len: 1024
       num_prompts: 10
       max_concurrency: 1
+      repetitions: 3
       args:
         num_warmups: 1
         temperature: 0
@@ -46,6 +47,7 @@ vllm_bench:
       output_len: 1024
       num_prompts: 640
       max_concurrency: 64
+      repetitions: 3
       args:
         num_warmups: 1
         temperature: 0
@@ -56,6 +58,7 @@ vllm_bench:
       output_len: 1024
       num_prompts: 1280
       max_concurrency: 128
+      repetitions: 3
       args:
         num_warmups: 1
         temperature: 0

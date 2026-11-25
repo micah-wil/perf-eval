@@ -41,6 +41,7 @@ vllm_bench:
       output_len: 1024
       num_prompts: 512
       max_concurrency: 16
+      repetitions: 3
     - name: 1k-in-1k-out
       backend: openai
       dataset: random
@@ -48,5 +49,6 @@ vllm_bench:
       output_len: 1024
       num_prompts: [10, 256, 512]
       max_concurrency: [1, 64, 128]
+      repetitions: 3
       speed_bench_dataset_subset: throughput_8k
       speed_bench_category: low_entropy
